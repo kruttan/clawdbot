@@ -4,6 +4,7 @@ import {
   resolveDefaultDiscordAccountId,
   resolveDiscordAccount,
 } from "../discord/accounts.js";
+import { monitorAgentMailProvider, probeAgentMail, resolveAgentMailToken } from "../agentmail/index.js";
 import { monitorDiscordProvider } from "../discord/index.js";
 import type {
   DiscordApplicationSummary,
@@ -88,6 +89,15 @@ export type IMessageRuntimeStatus = {
   dbPath?: string | null;
 };
 
+export type AgentMailRuntimeStatus = {
+  running: boolean;
+  lastStartAt?: number | null;
+  lastStopAt?: number | null;
+  lastError?: string | null;
+  webhookUrl?: string | null;
+  inboxCount?: number | null;
+};
+
 export type ProviderRuntimeSnapshot = {
   whatsapp: WebProviderStatus;
   whatsappAccounts?: Record<string, WebProviderStatus>;
@@ -101,6 +111,7 @@ export type ProviderRuntimeSnapshot = {
   signalAccounts?: Record<string, SignalRuntimeStatus>;
   imessage: IMessageRuntimeStatus;
   imessageAccounts?: Record<string, IMessageRuntimeStatus>;
+  agentmail: AgentMailRuntimeStatus;
 };
 
 type SubsystemLogger = ReturnType<typeof createSubsystemLogger>;
@@ -113,12 +124,14 @@ type ProviderManagerOptions = {
   logSlack: SubsystemLogger;
   logSignal: SubsystemLogger;
   logIMessage: SubsystemLogger;
+  logAgentMail: SubsystemLogger;
   whatsappRuntimeEnv: RuntimeEnv;
   telegramRuntimeEnv: RuntimeEnv;
   discordRuntimeEnv: RuntimeEnv;
   slackRuntimeEnv: RuntimeEnv;
   signalRuntimeEnv: RuntimeEnv;
   imessageRuntimeEnv: RuntimeEnv;
+  agentmailRuntimeEnv: RuntimeEnv;
 };
 
 export type ProviderManager = {
@@ -136,6 +149,8 @@ export type ProviderManager = {
   stopSignalProvider: (accountId?: string) => Promise<void>;
   startIMessageProvider: (accountId?: string) => Promise<void>;
   stopIMessageProvider: (accountId?: string) => Promise<void>;
+  startAgentMailProvider: () => Promise<void>;
+  stopAgentMailProvider: () => Promise<void>;
   markWhatsAppLoggedOut: (cleared: boolean, accountId?: string) => void;
 };
 
@@ -150,12 +165,14 @@ export function createProviderManager(
     logSlack,
     logSignal,
     logIMessage,
+    logAgentMail,
     whatsappRuntimeEnv,
     telegramRuntimeEnv,
     discordRuntimeEnv,
     slackRuntimeEnv,
     signalRuntimeEnv,
     imessageRuntimeEnv,
+    agentmailRuntimeEnv,
   } = opts;
 
   const whatsappAborts = new Map<string, AbortController>();
@@ -170,6 +187,8 @@ export function createProviderManager(
   const slackTasks = new Map<string, Promise<unknown>>();
   const signalTasks = new Map<string, Promise<unknown>>();
   const imessageTasks = new Map<string, Promise<unknown>>();
+  let agentmailAbort: AbortController | null = null;
+  let agentmailTask: Promise<unknown> | null = null;
 
   const whatsappRuntimes = new Map<string, WebProviderStatus>();
   const defaultWhatsAppStatus = (): WebProviderStatus => ({
@@ -227,6 +246,14 @@ export function createProviderManager(
 
   const updateWhatsAppStatus = (accountId: string, next: WebProviderStatus) => {
     whatsappRuntimes.set(accountId, next);
+  };
+  let agentmailRuntime: AgentMailRuntimeStatus = {
+    running: false,
+    lastStartAt: null,
+    lastStopAt: null,
+    lastError: null,
+    webhookUrl: null,
+    inboxCount: null,
   };
 
   const startWhatsAppProvider = async (accountId?: string) => {
@@ -1022,6 +1049,108 @@ export function createProviderManager(
     );
   };
 
+  const startAgentMailProvider = async () => {
+    if (agentmailTask) return;
+    const cfg = loadConfig();
+    if (cfg.agentmail?.enabled === false) {
+      agentmailRuntime = {
+        ...agentmailRuntime,
+        running: false,
+        lastError: "disabled",
+      };
+      if (shouldLogVerbose()) {
+        logAgentMail.debug(
+          "agentmail provider disabled (agentmail.enabled=false)",
+        );
+      }
+      return;
+    }
+    const { token: apiKey } = resolveAgentMailToken(cfg, {
+      logMissingFile: (message) => logAgentMail.warn(message),
+    });
+    if (!apiKey.trim()) {
+      agentmailRuntime = {
+        ...agentmailRuntime,
+        running: false,
+        lastError: "not configured",
+      };
+      if (shouldLogVerbose()) {
+        logAgentMail.debug(
+          "agentmail provider not configured (no AGENTMAIL_API_KEY)",
+        );
+      }
+      return;
+    }
+    // Probe to verify API key and get inbox count
+    let inboxCount: number | null = null;
+    try {
+      const probe = await probeAgentMail(apiKey.trim(), 5000);
+      if (probe.ok) {
+        inboxCount = probe.account?.inboxCount ?? null;
+      }
+    } catch (err) {
+      if (shouldLogVerbose()) {
+        logAgentMail.debug(`API probe failed: ${String(err)}`);
+      }
+    }
+    const webhookUrl = cfg.agentmail?.webhookUrl ?? `http://localhost:${cfg.agentmail?.webhookPort ?? 8788}${cfg.agentmail?.webhookPath ?? "/agentmail-webhook"}`;
+    logAgentMail.info(
+      `starting provider (webhook: ${webhookUrl})${cfg.agentmail ? "" : " (no agentmail config; key via env)"}`,
+    );
+    agentmailAbort = new AbortController();
+    agentmailRuntime = {
+      ...agentmailRuntime,
+      running: true,
+      lastStartAt: Date.now(),
+      lastError: null,
+      webhookUrl,
+      inboxCount,
+    };
+    const task = monitorAgentMailProvider({
+      apiKey: apiKey.trim(),
+      runtime: agentmailRuntimeEnv,
+      abortSignal: agentmailAbort.signal,
+      webhookUrl: cfg.agentmail?.webhookUrl,
+      webhookPort: cfg.agentmail?.webhookPort,
+      webhookPath: cfg.agentmail?.webhookPath,
+      webhookSecret: cfg.agentmail?.webhookSecret,
+    })
+      .catch((err) => {
+        agentmailRuntime = {
+          ...agentmailRuntime,
+          lastError: formatError(err),
+        };
+        logAgentMail.error(`provider exited: ${formatError(err)}`);
+      })
+      .finally(() => {
+        agentmailAbort = null;
+        agentmailTask = null;
+        agentmailRuntime = {
+          ...agentmailRuntime,
+          running: false,
+          lastStopAt: Date.now(),
+        };
+      });
+    agentmailTask = task;
+  };
+
+  const stopAgentMailProvider = async () => {
+    if (!agentmailAbort && !agentmailTask) return;
+    agentmailAbort?.abort();
+    try {
+      await agentmailTask;
+    } catch {
+      // ignore
+    }
+    agentmailAbort = null;
+    agentmailTask = null;
+    agentmailRuntime = {
+      ...agentmailRuntime,
+      running: false,
+      lastStopAt: Date.now(),
+    };
+  };
+
   const startProviders = async () => {
     await startWhatsAppProvider();
     await startDiscordProvider();
@@ -1029,6 +1158,7 @@ export function createProviderManager(
     await startTelegramProvider();
     await startSignalProvider();
     await startIMessageProvider();
+    await startAgentMailProvider();
   };
 
   const markWhatsAppLoggedOut = (cleared: boolean, accountId?: string) => {
@@ -1176,6 +1306,7 @@ export function createProviderManager(
       signalAccounts,
       imessage,
       imessageAccounts,
+      agentmail: { ...agentmailRuntime },
     };
   };
 
@@ -1194,6 +1325,8 @@ export function createProviderManager(
     stopSignalProvider,
     startIMessageProvider,
     stopIMessageProvider,
+    startAgentMailProvider,
+    stopAgentMailProvider,
     markWhatsAppLoggedOut,
   };
 }

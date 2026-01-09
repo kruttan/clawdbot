@@ -543,6 +543,9 @@ function defaultQueueModeForProvider(provider?: string): QueueMode {
   if (normalized === "telegram") return "collect";
   if (normalized === "imessage") return "collect";
   if (normalized === "signal") return "collect";
+  // Email is more "fire and forget" - use steer mode so new emails
+  // steer the agent rather than queuing up
+  if (normalized === "agentmail" || normalized === "email") return "steer";
   return "collect";
 }
 export function resolveQueueSettings(params: {

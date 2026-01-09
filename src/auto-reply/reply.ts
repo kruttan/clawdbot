@@ -243,7 +243,8 @@ export async function getReplyFromConfig(
   });
   const workspaceDir = workspace.dir;
   const agentDir = resolveAgentDir(cfg, agentId);
-  const timeoutMs = resolveAgentTimeoutMs({ cfg });
+  const surface = ctx.Surface?.trim().toLowerCase() || undefined;
+  const timeoutMs = resolveAgentTimeoutMs({ cfg, surface });
   const configuredTypingSeconds =
     agentCfg?.typingIntervalSeconds ?? sessionCfg?.typingIntervalSeconds;
   const typingIntervalSeconds =

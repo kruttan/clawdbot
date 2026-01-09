@@ -17,6 +17,7 @@ export type TextChunkProvider =
   | "slack"
   | "signal"
   | "imessage"
+  | "agentmail"
   | "webchat";
 
 const DEFAULT_CHUNK_LIMIT_BY_PROVIDER: Record<TextChunkProvider, number> = {
@@ -26,6 +27,7 @@ const DEFAULT_CHUNK_LIMIT_BY_PROVIDER: Record<TextChunkProvider, number> = {
   slack: 4000,
   signal: 4000,
   imessage: 4000,
+  agentmail: 10000,
   webchat: 4000,
 };
 
@@ -69,6 +71,9 @@ export function resolveTextChunkLimit(
         cfg?.imessage?.accounts?.[normalizedAccountId]?.textChunkLimit ??
         cfg?.imessage?.textChunkLimit
       );
+    }
+    if (provider === "agentmail") {
+      return cfg?.agentmail?.textChunkLimit;
     }
     return undefined;
   })();

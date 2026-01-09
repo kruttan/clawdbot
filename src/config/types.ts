@@ -87,6 +87,7 @@ export type AgentElevatedAllowFromConfig = {
   slack?: Array<string | number>;
   signal?: Array<string | number>;
   imessage?: Array<string | number>;
+  agentmail?: string[];
   webchat?: Array<string | number>;
 };
 
@@ -214,7 +215,8 @@ export type HookMappingConfig = {
     | "discord"
     | "slack"
     | "signal"
-    | "imessage";
+    | "imessage"
+    | "agentmail";
   to?: string;
   /** Override model for this hook (provider/model or alias). */
   model?: string;
@@ -614,6 +616,33 @@ export type IMessageConfig = {
   accounts?: Record<string, IMessageAccountConfig>;
 } & IMessageAccountConfig;
 
+export type AgentMailConfig = {
+  /** If false, do not start the AgentMail provider. Default: true. */
+  enabled?: boolean;
+  /** AgentMail API key. */
+  apiKey?: string;
+  /** Path to file containing API key (for secret managers like agenix). */
+  tokenFile?: string;
+  /** Default inbox ID to use for sending messages. */
+  defaultInboxId?: string;
+  /** Optional allowlist for inbound email addresses (supports *@domain.com wildcards). */
+  allowFrom?: string[];
+  /** Outbound text chunk size (chars). Default: 10000. */
+  textChunkLimit?: number;
+  /** Webhook server path. Default: /agentmail-webhook. */
+  webhookPath?: string;
+  /** Webhook server port. Default: 8788. */
+  webhookPort?: number;
+  /** Public URL for webhook (required for production). */
+  webhookUrl?: string;
+  /** Secret for verifying webhook signatures. */
+  webhookSecret?: string;
+  /** Agent timeout for email runs (seconds). Default: 1800 (30 min). Email is more "fire and forget". */
+  timeoutSeconds?: number;
+  /** Default thinking level for email runs. Default: "medium". */
+  thinkingDefault?: "off" | "minimal" | "low" | "medium" | "high";
+};
+
 export type QueueMode =
   | "steer"
   | "followup"
@@ -631,6 +660,7 @@ export type QueueModeByProvider = {
   slack?: QueueMode;
   signal?: QueueMode;
   imessage?: QueueMode;
+  agentmail?: QueueMode;
   webchat?: QueueMode;
 };
 
@@ -1120,6 +1150,7 @@ export type ClawdbotConfig = {
         | "slack"
         | "signal"
         | "imessage"
+        | "agentmail"
         | "none";
       /** Optional delivery override (E.164 for WhatsApp, chat id for Telegram). */
       to?: string;
@@ -1210,6 +1241,7 @@ export type ClawdbotConfig = {
   slack?: SlackConfig;
   signal?: SignalConfig;
   imessage?: IMessageConfig;
+  agentmail?: AgentMailConfig;
   cron?: CronConfig;
   hooks?: HooksConfig;
   bridge?: BridgeConfig;

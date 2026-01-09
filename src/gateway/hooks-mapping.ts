@@ -25,7 +25,8 @@ export type HookMappingResolved = {
     | "discord"
     | "slack"
     | "signal"
-    | "imessage";
+    | "imessage"
+    | "agentmail";
   to?: string;
   model?: string;
   thinking?: string;
