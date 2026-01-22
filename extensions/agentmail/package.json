@@ -1,0 +1,11 @@
+{
+  "name": "@clawdbot/agentmail",
+  "version": "2026.1.21",
+  "type": "module",
+  "description": "Clawdbot AgentMail channel plugin",
+  "clawdbot": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
