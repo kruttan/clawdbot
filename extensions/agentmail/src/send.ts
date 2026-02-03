@@ -1,4 +1,4 @@
-import type { ClawdbotConfig } from "clawdbot/plugin-sdk";
+import type { OpenClawConfig } from "openclaw/plugin-sdk";
 import { resolveAgentMailToken } from "./token.js";
 
 const AGENTMAIL_API_BASE = "https://api.agentmail.to/v1";
@@ -13,7 +13,7 @@ export type AgentMailSendOpts = {
   inReplyTo?: string;
   threadId?: string;
   verbose?: boolean;
-  cfg?: ClawdbotConfig;
+  cfg?: OpenClawConfig;
 };
 
 export type AgentMailSendResult = {
@@ -22,7 +22,7 @@ export type AgentMailSendResult = {
   threadId?: string;
 };
 
-function resolveApiKey(cfg: ClawdbotConfig | undefined, explicit?: string): string {
+function resolveApiKey(cfg: OpenClawConfig | undefined, explicit?: string): string {
   const { token } = resolveAgentMailToken(cfg, { envToken: explicit });
   if (!token) {
     throw new Error(
@@ -61,7 +61,7 @@ function normalizeRecipient(to: string): string {
  */
 async function resolveInboxId(
   apiKey: string,
-  cfg: ClawdbotConfig | undefined,
+  cfg: OpenClawConfig | undefined,
   explicitInboxId?: string,
 ): Promise<string> {
   if (explicitInboxId) return explicitInboxId;
@@ -152,7 +152,7 @@ export async function sendMessageAgentMail(
     body.subject = opts.subject;
   } else if (!isReply) {
     // Default subject for new messages
-    body.subject = "Message from Clawdbot";
+    body.subject = "Message from OpenClaw";
   }
 
   if (opts.html) {

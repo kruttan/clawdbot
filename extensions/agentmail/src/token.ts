@@ -1,6 +1,6 @@
 import fs from "node:fs";
 
-import type { ClawdbotConfig } from "clawdbot/plugin-sdk";
+import type { OpenClawConfig } from "openclaw/plugin-sdk";
 import type { AgentMailAccountConfig } from "./types.js";
 
 export type AgentMailTokenSource = "env" | "tokenFile" | "config" | "none";
@@ -16,7 +16,7 @@ type ResolveAgentMailTokenOpts = {
 };
 
 export function resolveAgentMailToken(
-  cfg?: ClawdbotConfig,
+  cfg?: OpenClawConfig,
   opts: ResolveAgentMailTokenOpts = {},
 ): AgentMailTokenResolution {
   const envToken = (opts.envToken ?? process.env.AGENTMAIL_API_KEY)?.trim();

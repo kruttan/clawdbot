@@ -1,11 +1,33 @@
 {
-  "name": "@clawdbot/agentmail",
-  "version": "2026.1.21",
+  "name": "@openclaw/agentmail",
+  "version": "2026.2.1",
+  "description": "OpenClaw AgentMail channel plugin",
   "type": "module",
-  "description": "Clawdbot AgentMail channel plugin",
-  "clawdbot": {
+  "devDependencies": {
+    "openclaw": "workspace:*"
+  },
+  "openclaw": {
     "extensions": [
       "./index.ts"
-    ]
+    ],
+    "channel": {
+      "id": "agentmail",
+      "label": "AgentMail",
+      "selectionLabel": "AgentMail (email)",
+      "docsPath": "/channels/agentmail",
+      "docsLabel": "agentmail",
+      "blurb": "Email via AgentMail API with webhook-based inbound.",
+      "aliases": [
+        "email",
+        "mail"
+      ],
+      "order": 110,
+      "quickstartAllowFrom": true
+    },
+    "install": {
+      "npmSpec": "@openclaw/agentmail",
+      "localPath": "extensions/agentmail",
+      "defaultChoice": "npm"
+    }
   }
 }
