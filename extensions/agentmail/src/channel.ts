@@ -1,10 +1,12 @@
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import {
   DEFAULT_ACCOUNT_ID,
   formatPairingApproveHint,
+  normalizePluginHttpPath,
+  registerPluginHttpRoute,
   type ChannelPlugin,
-  type ClawdbotConfig,
-} from "clawdbot/plugin-sdk";
+  type OpenClawConfig,
+} from "openclaw/plugin-sdk";
 
 import { getAgentMailRuntime } from "./runtime.js";
 import {
@@ -105,6 +107,23 @@ function normalizeEmail(email: string): string {
   return email.toLowerCase().trim();
 }
 
+function resolveAgentMailWebhookPath(webhookPath?: string, webhookUrl?: string): string {
+  const normalizedPath = normalizePluginHttpPath(webhookPath, null);
+  if (normalizedPath) {
+    return normalizedPath;
+  }
+  const trimmedUrl = webhookUrl?.trim();
+  if (trimmedUrl) {
+    try {
+      const url = new URL(trimmedUrl);
+      return normalizePluginHttpPath(url.pathname, "/agentmail-webhook") ?? "/agentmail-webhook";
+    } catch {
+      // Fall through to default if webhookUrl is invalid.
+    }
+  }
+  return "/agentmail-webhook";
+}
+
 export const agentmailPlugin: ChannelPlugin<ResolvedAgentMailAccount> = {
   id: "agentmail",
   meta: {
@@ -116,6 +135,7 @@ export const agentmailPlugin: ChannelPlugin<ResolvedAgentMailAccount> = {
     blurb: "Email via AgentMail API with webhook-based inbound",
     aliases: ["email", "mail"],
     order: 110,
+    quickstartAllowFrom: true,
   },
   capabilities: {
     chatTypes: ["direct"],
@@ -191,7 +211,7 @@ export const agentmailPlugin: ChannelPlugin<ResolvedAgentMailAccount> = {
     textChunkLimit: DEFAULT_TEXT_CHUNK_LIMIT,
     sendText: async ({ to, text, accountId }) => {
       const runtime = getAgentMailRuntime();
-      const cfg = runtime.config.loadConfig() as ClawdbotConfig;
+      const cfg = runtime.config.loadConfig() as OpenClawConfig;
       const account = resolveAgentMailAccount({ cfg, accountId });
       const { token: apiKey } = resolveAgentMailToken(cfg);
 
@@ -280,7 +300,7 @@ export const agentmailPlugin: ChannelPlugin<ResolvedAgentMailAccount> = {
       }
 
       const runtime = getAgentMailRuntime();
-      const cfg = runtime.config.loadConfig() as ClawdbotConfig;
+      const cfg = runtime.config.loadConfig() as OpenClawConfig;
       const { token: apiKey } = resolveAgentMailToken(cfg);
 
       if (!apiKey) {
@@ -291,11 +311,12 @@ export const agentmailPlugin: ChannelPlugin<ResolvedAgentMailAccount> = {
         | AgentMailAccountConfig
         | undefined;
 
-      const webhookPath = agentmailCfg?.webhookPath ?? "/agentmail-webhook";
-      const webhookPort = agentmailCfg?.webhookPort ?? 8788;
+      const webhookPath = resolveAgentMailWebhookPath(
+        agentmailCfg?.webhookPath,
+        agentmailCfg?.webhookUrl,
+      );
       const webhookSecret = agentmailCfg?.webhookSecret;
       const allowFrom = agentmailCfg?.allowFrom;
-      const healthPath = "/healthz";
 
       // Webhook event handler
       const processWebhookEvent = async (event: AgentMailWebhookEvent) => {
@@ -342,7 +363,7 @@ export const agentmailPlugin: ChannelPlugin<ResolvedAgentMailAccount> = {
           `[${account.accountId}] Email from ${senderLabel}: ${subject.slice(0, 50)}...`,
         );
 
-        // Forward to clawdbot's message pipeline
+        // Forward to OpenClaw's message pipeline
         await runtime.channel.reply.handleInboundMessage({
           channel: "agentmail",
           accountId: account.accountId,
@@ -362,71 +383,86 @@ export const agentmailPlugin: ChannelPlugin<ResolvedAgentMailAccount> = {
         });
       };
 
-      // HTTP server for webhook
-      const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
-        if (req.url === healthPath) {
-          res.writeHead(200);
-          res.end("ok");
-          return;
-        }
-
-        if (req.url !== webhookPath || req.method !== "POST") {
-          res.writeHead(404);
-          res.end();
-          return;
-        }
-
-        // Verify webhook secret if configured
-        if (webhookSecret) {
-          const signature = req.headers["x-agentmail-signature"];
-          if (!signature || signature !== webhookSecret) {
-            ctx.log?.warn("agentmail webhook signature mismatch");
-            res.writeHead(401);
-            res.end("Unauthorized");
+      const unregisterHttp = registerPluginHttpRoute({
+        path: webhookPath,
+        pluginId: "agentmail",
+        accountId: account.accountId,
+        log: (message) => ctx.log?.info(message),
+        handler: async (req: IncomingMessage, res: ServerResponse) => {
+          if (req.method !== "POST") {
+            res.statusCode = 405;
+            res.setHeader("Allow", "POST");
+            res.end();
             return;
           }
-        }
 
-        // Parse request body
-        let body = "";
-        for await (const chunk of req) {
-          body += chunk;
-        }
+          // Verify webhook secret if configured
+          if (webhookSecret) {
+            const signature = req.headers["x-agentmail-signature"];
+            if (typeof signature !== "string" || signature !== webhookSecret) {
+              ctx.log?.warn("agentmail webhook signature mismatch");
+              res.statusCode = 401;
+              res.end("Unauthorized");
+              return;
+            }
+          }
 
-        // Respond immediately (AgentMail best practice)
-        res.writeHead(200);
-        res.end("ok");
+          // Parse request body
+          let body = "";
+          for await (const chunk of req) {
+            body += chunk;
+          }
 
-        // Process event asynchronously
-        try {
-          const event = JSON.parse(body) as AgentMailWebhookEvent;
-          await processWebhookEvent(event);
-        } catch (err) {
-          ctx.log?.error(`agentmail webhook processing failed: ${err}`);
-        }
+          // Respond immediately (AgentMail best practice)
+          res.statusCode = 200;
+          res.end("ok");
+
+          // Process event asynchronously
+          try {
+            const event = JSON.parse(body) as AgentMailWebhookEvent;
+            await processWebhookEvent(event);
+          } catch (err) {
+            ctx.log?.error(`agentmail webhook processing failed: ${err}`);
+          }
+        },
       });
 
-      // Start server
-      await new Promise<void>((resolve) => server.listen(webhookPort, "0.0.0.0", resolve));
-
-      const publicUrl = agentmailCfg?.webhookUrl ?? `http://localhost:${webhookPort}${webhookPath}`;
-
-      ctx.log?.info(`agentmail webhook server listening on port ${webhookPort}`);
-      ctx.log?.info(`agentmail webhook URL: ${publicUrl}`);
+      ctx.log?.info(`agentmail webhook handler registered at ${webhookPath}`);
 
       // Register webhook with AgentMail
       let registeredWebhookId: string | undefined;
       try {
-        const { webhookId, secret } = await registerWebhook(
-          apiKey,
-          publicUrl,
-          ["message.received"],
-          "clawdbot-webhook",
-        );
-        registeredWebhookId = webhookId;
-        ctx.log?.info(`agentmail webhook registered: ${webhookId}`);
-        if (secret) {
-          ctx.log?.debug(`agentmail webhook secret: ${secret}`);
+        const publicUrl = agentmailCfg?.webhookUrl?.trim();
+        if (!publicUrl) {
+          ctx.log?.warn("agentmail webhookUrl not configured; skipping webhook registration");
+        } else {
+          let parsedUrl: URL | null = null;
+          try {
+            parsedUrl = new URL(publicUrl);
+          } catch (err) {
+            ctx.log?.warn(`agentmail webhookUrl is invalid: ${String(err)}`);
+          }
+
+          if (parsedUrl) {
+            const urlPath = parsedUrl.pathname;
+            if (urlPath && urlPath !== webhookPath) {
+              ctx.log?.warn(
+                `agentmail webhookUrl path (${urlPath}) does not match webhookPath (${webhookPath})`,
+              );
+            }
+
+            const { webhookId, secret } = await registerWebhook(
+              apiKey,
+              publicUrl,
+              ["message.received"],
+              "openclaw-webhook",
+            );
+            registeredWebhookId = webhookId;
+            ctx.log?.info(`agentmail webhook registered: ${webhookId}`);
+            if (secret) {
+              ctx.log?.debug(`agentmail webhook secret: ${secret}`);
+            }
+          }
         }
       } catch (err) {
         ctx.log?.error(`agentmail webhook registration failed: ${err}`);
@@ -437,7 +473,7 @@ export const agentmailPlugin: ChannelPlugin<ResolvedAgentMailAccount> = {
       // Return cleanup function
       return {
         stop: () => {
-          server.close();
+          unregisterHttp();
           if (registeredWebhookId) {
             deleteWebhook(apiKey, registeredWebhookId).catch((err) => {
               ctx.log?.debug(`agentmail webhook cleanup failed: ${err}`);

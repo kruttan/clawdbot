@@ -1,4 +1,4 @@
-import type { ClawdbotConfig } from "clawdbot/plugin-sdk";
+import type { OpenClawConfig } from "openclaw/plugin-sdk";
 
 export interface AgentMailAccountConfig {
   enabled?: boolean;
@@ -29,7 +29,7 @@ export interface ResolvedAgentMailAccount {
 
 const DEFAULT_ACCOUNT_ID = "default";
 
-export function listAgentMailAccountIds(cfg: ClawdbotConfig): string[] {
+export function listAgentMailAccountIds(cfg: OpenClawConfig): string[] {
   const agentmailCfg = (cfg.channels as Record<string, unknown> | undefined)?.agentmail as
     | AgentMailAccountConfig
     | undefined;
@@ -47,14 +47,14 @@ export function listAgentMailAccountIds(cfg: ClawdbotConfig): string[] {
   return [];
 }
 
-export function resolveDefaultAgentMailAccountId(cfg: ClawdbotConfig): string {
+export function resolveDefaultAgentMailAccountId(cfg: OpenClawConfig): string {
   const ids = listAgentMailAccountIds(cfg);
   if (ids.includes(DEFAULT_ACCOUNT_ID)) return DEFAULT_ACCOUNT_ID;
   return ids[0] ?? DEFAULT_ACCOUNT_ID;
 }
 
 export function resolveAgentMailAccount(opts: {
-  cfg: ClawdbotConfig;
+  cfg: OpenClawConfig;
   accountId?: string | null;
 }): ResolvedAgentMailAccount {
   const accountId = opts.accountId ?? DEFAULT_ACCOUNT_ID;
