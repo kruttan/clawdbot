@@ -41,8 +41,12 @@ function getSessionState(ref: SessionRef): SessionState {
   const key = resolveSessionKey(ref);
   const existing = sessionStates.get(key);
   if (existing) {
-    if (ref.sessionId) existing.sessionId = ref.sessionId;
-    if (ref.sessionKey) existing.sessionKey = ref.sessionKey;
+    if (ref.sessionId) {
+      existing.sessionId = ref.sessionId;
+    }
+    if (ref.sessionKey) {
+      existing.sessionKey = ref.sessionKey;
+    }
     return existing;
   }
   const created: SessionState = {
@@ -63,7 +67,7 @@ export function logWebhookReceived(params: {
 }) {
   webhookStats.received += 1;
   webhookStats.lastReceived = Date.now();
-  diag.info(
+  diag.debug(
     `webhook received: channel=${params.channel} type=${params.updateType ?? "unknown"} chatId=${
       params.chatId ?? "unknown"
     } total=${webhookStats.received}`,
@@ -84,7 +88,7 @@ export function logWebhookProcessed(params: {
   durationMs?: number;
 }) {
   webhookStats.processed += 1;
-  diag.info(
+  diag.debug(
     `webhook processed: channel=${params.channel} type=${
       params.updateType ?? "unknown"
     } chatId=${params.chatId ?? "unknown"} duration=${params.durationMs ?? 0}ms processed=${
@@ -132,7 +136,7 @@ export function logMessageQueued(params: {
   const state = getSessionState(params);
   state.queueDepth += 1;
   state.lastActivity = Date.now();
-  diag.info(
+  diag.debug(
     `message queued: sessionId=${state.sessionId ?? "unknown"} sessionKey=${
       state.sessionKey ?? "unknown"
     } source=${params.source} queueDepth=${state.queueDepth} sessionState=${state.state}`,
@@ -173,7 +177,7 @@ export function logMessageProcessed(params: {
   } else if (params.outcome === "skipped") {
     diag.debug(payload);
   } else {
-    diag.info(payload);
+    diag.debug(payload);
   }
   emitDiagnosticEvent({
     type: "message.processed",
@@ -201,9 +205,11 @@ export function logSessionStateChange(
   const prevState = state.state;
   state.state = params.state;
   state.lastActivity = Date.now();
-  if (params.state === "idle") state.queueDepth = Math.max(0, state.queueDepth - 1);
+  if (params.state === "idle") {
+    state.queueDepth = Math.max(0, state.queueDepth - 1);
+  }
   if (!isProbeSession) {
-    diag.info(
+    diag.debug(
       `session state: sessionId=${state.sessionId ?? "unknown"} sessionKey=${
         state.sessionKey ?? "unknown"
       } prev=${prevState} new=${params.state} reason="${params.reason ?? ""}" queueDepth=${
@@ -263,7 +269,7 @@ export function logLaneDequeue(lane: string, waitMs: number, queueSize: number) 
 }
 
 export function logRunAttempt(params: SessionRef & { runId: string; attempt: number }) {
-  diag.info(
+  diag.debug(
     `run attempt: sessionId=${params.sessionId ?? "unknown"} sessionKey=${
       params.sessionKey ?? "unknown"
     } runId=${params.runId} attempt=${params.attempt}`,
@@ -285,14 +291,16 @@ export function logActiveRuns() {
       ([id, s]) =>
         `${id}(q=${s.queueDepth},age=${Math.round((Date.now() - s.lastActivity) / 1000)}s)`,
     );
-  diag.info(`active runs: count=${activeSessions.length} sessions=[${activeSessions.join(", ")}]`);
+  diag.debug(`active runs: count=${activeSessions.length} sessions=[${activeSessions.join(", ")}]`);
   markActivity();
 }
 
 let heartbeatInterval: NodeJS.Timeout | null = null;
 
 export function startDiagnosticHeartbeat() {
-  if (heartbeatInterval) return;
+  if (heartbeatInterval) {
+    return;
+  }
   heartbeatInterval = setInterval(() => {
     const now = Date.now();
     const activeCount = Array.from(sessionStates.values()).filter(
@@ -311,10 +319,14 @@ export function startDiagnosticHeartbeat() {
       activeCount > 0 ||
       waitingCount > 0 ||
       totalQueued > 0;
-    if (!hasActivity) return;
-    if (now - lastActivityAt > 120_000 && activeCount === 0 && waitingCount === 0) return;
+    if (!hasActivity) {
+      return;
+    }
+    if (now - lastActivityAt > 120_000 && activeCount === 0 && waitingCount === 0) {
+      return;
+    }
 
-    diag.info(
+    diag.debug(
       `heartbeat: webhooks=${webhookStats.received}/${webhookStats.processed}/${webhookStats.errors} active=${activeCount} waiting=${waitingCount} queued=${totalQueued}`,
     );
     emitDiagnosticEvent({

@@ -1,12 +1,17 @@
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
-import type { ExtensionAPI, ExtensionContext, FileOperations } from "@mariozechner/pi-coding-agent";
-import { estimateTokens, generateSummary } from "@mariozechner/pi-coding-agent";
-
-import { DEFAULT_CONTEXT_TOKENS } from "../defaults.js";
-
-const BASE_CHUNK_RATIO = 0.4;
-const MIN_CHUNK_RATIO = 0.15;
-const SAFETY_MARGIN = 1.2; // 20% buffer for estimateTokens() inaccuracy
+import type { ExtensionAPI, FileOperations } from "@mariozechner/pi-coding-agent";
+import {
+  BASE_CHUNK_RATIO,
+  MIN_CHUNK_RATIO,
+  SAFETY_MARGIN,
+  computeAdaptiveChunkRatio,
+  estimateMessagesTokens,
+  isOversizedForSummary,
+  pruneHistoryForContextShare,
+  resolveContextWindowTokens,
+  summarizeInStages,
+} from "../compaction.js";
+import { getCompactionSafeguardRuntime } from "./compaction-safeguard-runtime.js";
 const FALLBACK_SUMMARY =
   "Summary unavailable due to context limits. Older messages were truncated.";
 const TURN_PREFIX_INSTRUCTIONS =
@@ -27,12 +32,16 @@ function normalizeFailureText(text: string): string {
 }
 
 function truncateFailureText(text: string, maxChars: number): string {
-  if (text.length <= maxChars) return text;
+  if (text.length <= maxChars) {
+    return text;
+  }
   return `${text.slice(0, Math.max(0, maxChars - 3))}...`;
 }
 
 function formatToolFailureMeta(details: unknown): string | undefined {
-  if (!details || typeof details !== "object") return undefined;
+  if (!details || typeof details !== "object") {
+    return undefined;
+  }
   const record = details as Record<string, unknown>;
   const status = typeof record.status === "string" ? record.status : undefined;
   const exitCode =
@@ -40,16 +49,24 @@ function formatToolFailureMeta(details: unknown): string | undefined {
       ? record.exitCode
       : undefined;
   const parts: string[] = [];
-  if (status) parts.push(`status=${status}`);
-  if (exitCode !== undefined) parts.push(`exitCode=${exitCode}`);
+  if (status) {
+    parts.push(`status=${status}`);
+  }
+  if (exitCode !== undefined) {
+    parts.push(`exitCode=${exitCode}`);
+  }
   return parts.length > 0 ? parts.join(" ") : undefined;
 }
 
 function extractToolResultText(content: unknown): string {
-  if (!Array.isArray(content)) return "";
+  if (!Array.isArray(content)) {
+    return "";
+  }
   const parts: string[] = [];
   for (const block of content) {
-    if (!block || typeof block !== "object") continue;
+    if (!block || typeof block !== "object") {
+      continue;
+    }
     const rec = block as { type?: unknown; text?: unknown };
     if (rec.type === "text" && typeof rec.text === "string") {
       parts.push(rec.text);
@@ -63,9 +80,13 @@ function collectToolFailures(messages: AgentMessage[]): ToolFailure[] {
   const seen = new Set<string>();
 
   for (const message of messages) {
-    if (!message || typeof message !== "object") continue;
+    if (!message || typeof message !== "object") {
+      continue;
+    }
     const role = (message as { role?: unknown }).role;
-    if (role !== "toolResult") continue;
+    if (role !== "toolResult") {
+      continue;
+    }
     const toolResult = message as {
       toolCallId?: unknown;
       toolName?: unknown;
@@ -73,9 +94,13 @@ function collectToolFailures(messages: AgentMessage[]): ToolFailure[] {
       details?: unknown;
       isError?: unknown;
     };
-    if (toolResult.isError !== true) continue;
+    if (toolResult.isError !== true) {
+      continue;
+    }
     const toolCallId = typeof toolResult.toolCallId === "string" ? toolResult.toolCallId : "";
-    if (!toolCallId || seen.has(toolCallId)) continue;
+    if (!toolCallId || seen.has(toolCallId)) {
+      continue;
+    }
     seen.add(toolCallId);
 
     const toolName =
@@ -96,7 +121,9 @@ function collectToolFailures(messages: AgentMessage[]): ToolFailure[] {
 }
 
 function formatToolFailuresSection(failures: ToolFailure[]): string {
-  if (failures.length === 0) return "";
+  if (failures.length === 0) {
+    return "";
+  }
   const lines = failures.slice(0, MAX_TOOL_FAILURES).map((failure) => {
     const meta = failure.meta ? ` (${failure.meta})` : "";
     return `- ${failure.toolName}${meta}: ${failure.summary}`;
@@ -112,8 +139,8 @@ function computeFileLists(fileOps: FileOperations): {
   modifiedFiles: string[];
 } {
   const modified = new Set([...fileOps.edited, ...fileOps.written]);
-  const readFiles = [...fileOps.read].filter((f) => !modified.has(f)).sort();
-  const modifiedFiles = [...modified].sort();
+  const readFiles = [...fileOps.read].filter((f) => !modified.has(f)).toSorted();
+  const modifiedFiles = [...modified].toSorted();
   return { readFiles, modifiedFiles };
 }
 
@@ -125,177 +152,10 @@ function formatFileOperations(readFiles: string[], modifiedFiles: string[]): str
   if (modifiedFiles.length > 0) {
     sections.push(`<modified-files>\n${modifiedFiles.join("\n")}\n</modified-files>`);
   }
-  if (sections.length === 0) return "";
+  if (sections.length === 0) {
+    return "";
+  }
   return `\n\n${sections.join("\n\n")}`;
-}
-
-function chunkMessages(messages: AgentMessage[], maxTokens: number): AgentMessage[][] {
-  if (messages.length === 0) return [];
-
-  const chunks: AgentMessage[][] = [];
-  let currentChunk: AgentMessage[] = [];
-  let currentTokens = 0;
-
-  for (const message of messages) {
-    const messageTokens = estimateTokens(message);
-    if (currentChunk.length > 0 && currentTokens + messageTokens > maxTokens) {
-      chunks.push(currentChunk);
-      currentChunk = [];
-      currentTokens = 0;
-    }
-
-    currentChunk.push(message);
-    currentTokens += messageTokens;
-
-    if (messageTokens > maxTokens) {
-      // Split oversized messages to avoid unbounded chunk growth.
-      chunks.push(currentChunk);
-      currentChunk = [];
-      currentTokens = 0;
-    }
-  }
-
-  if (currentChunk.length > 0) {
-    chunks.push(currentChunk);
-  }
-
-  return chunks;
-}
-
-/**
- * Compute adaptive chunk ratio based on average message size.
- * When messages are large, we use smaller chunks to avoid exceeding model limits.
- */
-function computeAdaptiveChunkRatio(messages: AgentMessage[], contextWindow: number): number {
-  if (messages.length === 0) return BASE_CHUNK_RATIO;
-
-  const totalTokens = messages.reduce((sum, m) => sum + estimateTokens(m), 0);
-  const avgTokens = totalTokens / messages.length;
-
-  // Apply safety margin to account for estimation inaccuracy
-  const safeAvgTokens = avgTokens * SAFETY_MARGIN;
-  const avgRatio = safeAvgTokens / contextWindow;
-
-  // If average message is > 10% of context, reduce chunk ratio
-  if (avgRatio > 0.1) {
-    const reduction = Math.min(avgRatio * 2, BASE_CHUNK_RATIO - MIN_CHUNK_RATIO);
-    return Math.max(MIN_CHUNK_RATIO, BASE_CHUNK_RATIO - reduction);
-  }
-
-  return BASE_CHUNK_RATIO;
-}
-
-/**
- * Check if a single message is too large to summarize.
- * If single message > 50% of context, it can't be summarized safely.
- */
-function isOversizedForSummary(msg: AgentMessage, contextWindow: number): boolean {
-  const tokens = estimateTokens(msg) * SAFETY_MARGIN;
-  return tokens > contextWindow * 0.5;
-}
-
-async function summarizeChunks(params: {
-  messages: AgentMessage[];
-  model: NonNullable<ExtensionContext["model"]>;
-  apiKey: string;
-  signal: AbortSignal;
-  reserveTokens: number;
-  maxChunkTokens: number;
-  customInstructions?: string;
-  previousSummary?: string;
-}): Promise<string> {
-  if (params.messages.length === 0) {
-    return params.previousSummary ?? "No prior history.";
-  }
-
-  const chunks = chunkMessages(params.messages, params.maxChunkTokens);
-  let summary = params.previousSummary;
-
-  for (const chunk of chunks) {
-    summary = await generateSummary(
-      chunk,
-      params.model,
-      params.reserveTokens,
-      params.apiKey,
-      params.signal,
-      params.customInstructions,
-      summary,
-    );
-  }
-
-  return summary ?? "No prior history.";
-}
-
-/**
- * Summarize with progressive fallback for handling oversized messages.
- * If full summarization fails, tries partial summarization excluding oversized messages.
- */
-async function summarizeWithFallback(params: {
-  messages: AgentMessage[];
-  model: NonNullable<ExtensionContext["model"]>;
-  apiKey: string;
-  signal: AbortSignal;
-  reserveTokens: number;
-  maxChunkTokens: number;
-  contextWindow: number;
-  customInstructions?: string;
-  previousSummary?: string;
-}): Promise<string> {
-  const { messages, contextWindow } = params;
-
-  if (messages.length === 0) {
-    return params.previousSummary ?? "No prior history.";
-  }
-
-  // Try full summarization first
-  try {
-    return await summarizeChunks(params);
-  } catch (fullError) {
-    console.warn(
-      `Full summarization failed, trying partial: ${
-        fullError instanceof Error ? fullError.message : String(fullError)
-      }`,
-    );
-  }
-
-  // Fallback 1: Summarize only small messages, note oversized ones
-  const smallMessages: AgentMessage[] = [];
-  const oversizedNotes: string[] = [];
-
-  for (const msg of messages) {
-    if (isOversizedForSummary(msg, contextWindow)) {
-      const role = (msg as { role?: string }).role ?? "message";
-      const tokens = estimateTokens(msg);
-      oversizedNotes.push(
-        `[Large ${role} (~${Math.round(tokens / 1000)}K tokens) omitted from summary]`,
-      );
-    } else {
-      smallMessages.push(msg);
-    }
-  }
-
-  if (smallMessages.length > 0) {
-    try {
-      const partialSummary = await summarizeChunks({
-        ...params,
-        messages: smallMessages,
-      });
-      const notes = oversizedNotes.length > 0 ? `\n\n${oversizedNotes.join("\n")}` : "";
-      return partialSummary + notes;
-    } catch (partialError) {
-      console.warn(
-        `Partial summarization also failed: ${
-          partialError instanceof Error ? partialError.message : String(partialError)
-        }`,
-      );
-    }
-  }
-
-  // Final fallback: Just note what was there
-  return (
-    `Context contained ${messages.length} messages (${oversizedNotes.length} oversized). ` +
-    `Summary unavailable due to size limits.`
-  );
 }
 
 export default function compactionSafeguardExtension(api: ExtensionAPI): void {
@@ -335,19 +195,91 @@ export default function compactionSafeguardExtension(api: ExtensionAPI): void {
     }
 
     try {
-      const contextWindowTokens = Math.max(
-        1,
-        Math.floor(model.contextWindow ?? DEFAULT_CONTEXT_TOKENS),
-      );
+      const runtime = getCompactionSafeguardRuntime(ctx.sessionManager);
+      const modelContextWindow = resolveContextWindowTokens(model);
+      const contextWindowTokens = runtime?.contextWindowTokens ?? modelContextWindow;
+      const turnPrefixMessages = preparation.turnPrefixMessages ?? [];
+      let messagesToSummarize = preparation.messagesToSummarize;
+
+      const maxHistoryShare = runtime?.maxHistoryShare ?? 0.5;
+
+      const tokensBefore =
+        typeof preparation.tokensBefore === "number" && Number.isFinite(preparation.tokensBefore)
+          ? preparation.tokensBefore
+          : undefined;
+
+      let droppedSummary: string | undefined;
+
+      if (tokensBefore !== undefined) {
+        const summarizableTokens =
+          estimateMessagesTokens(messagesToSummarize) + estimateMessagesTokens(turnPrefixMessages);
+        const newContentTokens = Math.max(0, Math.floor(tokensBefore - summarizableTokens));
+        // Apply SAFETY_MARGIN so token underestimates don't trigger unnecessary pruning
+        const maxHistoryTokens = Math.floor(contextWindowTokens * maxHistoryShare * SAFETY_MARGIN);
+
+        if (newContentTokens > maxHistoryTokens) {
+          const pruned = pruneHistoryForContextShare({
+            messages: messagesToSummarize,
+            maxContextTokens: contextWindowTokens,
+            maxHistoryShare,
+            parts: 2,
+          });
+          if (pruned.droppedChunks > 0) {
+            const newContentRatio = (newContentTokens / contextWindowTokens) * 100;
+            console.warn(
+              `Compaction safeguard: new content uses ${newContentRatio.toFixed(
+                1,
+              )}% of context; dropped ${pruned.droppedChunks} older chunk(s) ` +
+                `(${pruned.droppedMessages} messages) to fit history budget.`,
+            );
+            messagesToSummarize = pruned.messages;
+
+            // Summarize dropped messages so context isn't lost
+            if (pruned.droppedMessagesList.length > 0) {
+              try {
+                const droppedChunkRatio = computeAdaptiveChunkRatio(
+                  pruned.droppedMessagesList,
+                  contextWindowTokens,
+                );
+                const droppedMaxChunkTokens = Math.max(
+                  1,
+                  Math.floor(contextWindowTokens * droppedChunkRatio),
+                );
+                droppedSummary = await summarizeInStages({
+                  messages: pruned.droppedMessagesList,
+                  model,
+                  apiKey,
+                  signal,
+                  reserveTokens: Math.max(1, Math.floor(preparation.settings.reserveTokens)),
+                  maxChunkTokens: droppedMaxChunkTokens,
+                  contextWindow: contextWindowTokens,
+                  customInstructions,
+                  previousSummary: preparation.previousSummary,
+                });
+              } catch (droppedError) {
+                console.warn(
+                  `Compaction safeguard: failed to summarize dropped messages, continuing without: ${
+                    droppedError instanceof Error ? droppedError.message : String(droppedError)
+                  }`,
+                );
+              }
+            }
+          }
+        }
+      }
 
       // Use adaptive chunk ratio based on message sizes
-      const allMessages = [...preparation.messagesToSummarize, ...preparation.turnPrefixMessages];
+      const allMessages = [...messagesToSummarize, ...turnPrefixMessages];
       const adaptiveRatio = computeAdaptiveChunkRatio(allMessages, contextWindowTokens);
       const maxChunkTokens = Math.max(1, Math.floor(contextWindowTokens * adaptiveRatio));
       const reserveTokens = Math.max(1, Math.floor(preparation.settings.reserveTokens));
 
-      const historySummary = await summarizeWithFallback({
-        messages: preparation.messagesToSummarize,
+      // Feed dropped-messages summary as previousSummary so the main summarization
+      // incorporates context from pruned messages instead of losing it entirely.
+      const effectivePreviousSummary = droppedSummary ?? preparation.previousSummary;
+
+      const historySummary = await summarizeInStages({
+        messages: messagesToSummarize,
         model,
         apiKey,
         signal,
@@ -355,13 +287,13 @@ export default function compactionSafeguardExtension(api: ExtensionAPI): void {
         maxChunkTokens,
         contextWindow: contextWindowTokens,
         customInstructions,
-        previousSummary: preparation.previousSummary,
+        previousSummary: effectivePreviousSummary,
       });
 
       let summary = historySummary;
-      if (preparation.isSplitTurn && preparation.turnPrefixMessages.length > 0) {
-        const prefixSummary = await summarizeWithFallback({
-          messages: preparation.turnPrefixMessages,
+      if (preparation.isSplitTurn && turnPrefixMessages.length > 0) {
+        const prefixSummary = await summarizeInStages({
+          messages: turnPrefixMessages,
           model,
           apiKey,
           signal,
@@ -369,6 +301,7 @@ export default function compactionSafeguardExtension(api: ExtensionAPI): void {
           maxChunkTokens,
           contextWindow: contextWindowTokens,
           customInstructions: TURN_PREFIX_INSTRUCTIONS,
+          previousSummary: undefined,
         });
         summary = `${historySummary}\n\n---\n\n**Turn Context (split turn):**\n\n${prefixSummary}`;
       }

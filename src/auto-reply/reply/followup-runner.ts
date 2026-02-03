@@ -1,24 +1,20 @@
 import crypto from "node:crypto";
+import type { TypingMode } from "../../config/types.js";
+import type { OriginatingChannelType } from "../templating.js";
+import type { GetReplyOptions, ReplyPayload } from "../types.js";
+import type { FollowupRun } from "./queue.js";
+import type { TypingController } from "./typing.js";
 import { resolveAgentModelFallbacksOverride } from "../../agents/agent-scope.js";
 import { lookupContextTokens } from "../../agents/context.js";
 import { DEFAULT_CONTEXT_TOKENS } from "../../agents/defaults.js";
 import { runWithModelFallback } from "../../agents/model-fallback.js";
 import { runEmbeddedPiAgent } from "../../agents/pi-embedded.js";
-import { hasNonzeroUsage } from "../../agents/usage.js";
-import {
-  resolveAgentIdFromSessionKey,
-  type SessionEntry,
-  updateSessionStoreEntry,
-} from "../../config/sessions.js";
-import type { TypingMode } from "../../config/types.js";
+import { resolveAgentIdFromSessionKey, type SessionEntry } from "../../config/sessions.js";
 import { logVerbose } from "../../globals.js";
 import { registerAgentRunContext } from "../../infra/agent-events.js";
 import { defaultRuntime } from "../../runtime.js";
 import { stripHeartbeatToken } from "../heartbeat.js";
-import type { OriginatingChannelType } from "../templating.js";
 import { isSilentReplyText, SILENT_REPLY_TOKEN } from "../tokens.js";
-import type { GetReplyOptions, ReplyPayload } from "../types.js";
-import type { FollowupRun } from "./queue.js";
 import {
   applyReplyThreading,
   filterMessagingToolDuplicates,
@@ -27,7 +23,7 @@ import {
 import { resolveReplyToMode } from "./reply-threading.js";
 import { isRoutableChannel, routeReply } from "./route-reply.js";
 import { incrementCompactionCount } from "./session-updates.js";
-import type { TypingController } from "./typing.js";
+import { persistSessionUsageUpdate } from "./session-usage.js";
 import { createTypingSignaler } from "./typing-mode.js";
 
 export function createFollowupRunner(params: {
@@ -133,6 +129,7 @@ export function createFollowupRunner(params: {
           cfg: queued.run.config,
           provider: queued.run.provider,
           model: queued.run.model,
+          agentDir: queued.run.agentDir,
           fallbacksOverride: resolveAgentModelFallbacksOverride(
             queued.run.config,
             resolveAgentIdFromSessionKey(queued.run.sessionKey),
@@ -147,6 +144,13 @@ export function createFollowupRunner(params: {
               agentAccountId: queued.run.agentAccountId,
               messageTo: queued.originatingTo,
               messageThreadId: queued.originatingThreadId,
+              groupId: queued.run.groupId,
+              groupChannel: queued.run.groupChannel,
+              groupSpace: queued.run.groupSpace,
+              senderId: queued.run.senderId,
+              senderName: queued.run.senderName,
+              senderUsername: queued.run.senderUsername,
+              senderE164: queued.run.senderE164,
               sessionFile: queued.run.sessionFile,
               workspaceDir: queued.run.workspaceDir,
               config: queued.run.config,
@@ -168,7 +172,9 @@ export function createFollowupRunner(params: {
               runId,
               blockReplyBreak: queued.run.blockReplyBreak,
               onAgentEvent: (evt) => {
-                if (evt.stream !== "compaction") return;
+                if (evt.stream !== "compaction") {
+                  return;
+                }
                 const phase = typeof evt.data.phase === "string" ? evt.data.phase : "";
                 const willRetry = Boolean(evt.data.willRetry);
                 if (phase === "end" && !willRetry) {
@@ -187,14 +193,40 @@ export function createFollowupRunner(params: {
         return;
       }
 
+      if (storePath && sessionKey) {
+        const usage = runResult.meta.agentMeta?.usage;
+        const modelUsed = runResult.meta.agentMeta?.model ?? fallbackModel ?? defaultModel;
+        const contextTokensUsed =
+          agentCfgContextTokens ??
+          lookupContextTokens(modelUsed) ??
+          sessionEntry?.contextTokens ??
+          DEFAULT_CONTEXT_TOKENS;
+
+        await persistSessionUsageUpdate({
+          storePath,
+          sessionKey,
+          usage,
+          modelUsed,
+          providerUsed: fallbackProvider,
+          contextTokensUsed,
+          logLabel: "followup",
+        });
+      }
+
       const payloadArray = runResult.payloads ?? [];
-      if (payloadArray.length === 0) return;
+      if (payloadArray.length === 0) {
+        return;
+      }
       const sanitizedPayloads = payloadArray.flatMap((payload) => {
         const text = payload.text;
-        if (!text || !text.includes("HEARTBEAT_OK")) return [payload];
+        if (!text || !text.includes("HEARTBEAT_OK")) {
+          return [payload];
+        }
         const stripped = stripHeartbeatToken(text, { mode: "message" });
         const hasMedia = Boolean(payload.mediaUrl) || (payload.mediaUrls?.length ?? 0) > 0;
-        if (stripped.shouldSkip && !hasMedia) return [];
+        if (stripped.shouldSkip && !hasMedia) {
+          return [];
+        }
         return [{ ...payload, text: stripped.text }];
       });
       const replyToChannel =
@@ -225,7 +257,9 @@ export function createFollowupRunner(params: {
       });
       const finalPayloads = suppressMessagingToolReplies ? [] : dedupedPayloads;
 
-      if (finalPayloads.length === 0) return;
+      if (finalPayloads.length === 0) {
+        return;
+      }
 
       if (autoCompactionCompleted) {
         const count = await incrementCompactionCount({
@@ -239,56 +273,6 @@ export function createFollowupRunner(params: {
           finalPayloads.unshift({
             text: `🧹 Auto-compaction complete${suffix}.`,
           });
-        }
-      }
-
-      if (storePath && sessionKey) {
-        const usage = runResult.meta.agentMeta?.usage;
-        const modelUsed = runResult.meta.agentMeta?.model ?? fallbackModel ?? defaultModel;
-        const contextTokensUsed =
-          agentCfgContextTokens ??
-          lookupContextTokens(modelUsed) ??
-          sessionEntry?.contextTokens ??
-          DEFAULT_CONTEXT_TOKENS;
-
-        if (hasNonzeroUsage(usage)) {
-          try {
-            await updateSessionStoreEntry({
-              storePath,
-              sessionKey,
-              update: async (entry) => {
-                const input = usage.input ?? 0;
-                const output = usage.output ?? 0;
-                const promptTokens = input + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
-                return {
-                  inputTokens: input,
-                  outputTokens: output,
-                  totalTokens: promptTokens > 0 ? promptTokens : (usage.total ?? input),
-                  modelProvider: fallbackProvider ?? entry.modelProvider,
-                  model: modelUsed,
-                  contextTokens: contextTokensUsed ?? entry.contextTokens,
-                  updatedAt: Date.now(),
-                };
-              },
-            });
-          } catch (err) {
-            logVerbose(`failed to persist followup usage update: ${String(err)}`);
-          }
-        } else if (modelUsed || contextTokensUsed) {
-          try {
-            await updateSessionStoreEntry({
-              storePath,
-              sessionKey,
-              update: async (entry) => ({
-                modelProvider: fallbackProvider ?? entry.modelProvider,
-                model: modelUsed ?? entry.model,
-                contextTokens: contextTokensUsed ?? entry.contextTokens,
-                updatedAt: Date.now(),
-              }),
-            });
-          } catch (err) {
-            logVerbose(`failed to persist followup model/context update: ${String(err)}`);
-          }
         }
       }
 

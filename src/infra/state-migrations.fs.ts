@@ -1,6 +1,5 @@
-import fs from "node:fs";
-
 import JSON5 from "json5";
+import fs from "node:fs";
 
 export type SessionEntryLike = {
   sessionId?: string;
@@ -36,8 +35,12 @@ export function fileExists(p: string): boolean {
 }
 
 export function isLegacyWhatsAppAuthFile(name: string): boolean {
-  if (name === "creds.json" || name === "creds.json.bak") return true;
-  if (!name.endsWith(".json")) return false;
+  if (name === "creds.json" || name === "creds.json.bak") {
+    return true;
+  }
+  if (!name.endsWith(".json")) {
+    return false;
+  }
   return /^(app-state-sync|session|sender-key|pre-key)-/.test(name);
 }
 
@@ -48,7 +51,7 @@ export function readSessionStoreJson5(storePath: string): {
   try {
     const raw = fs.readFileSync(storePath, "utf-8");
     const parsed = JSON5.parse(raw);
-    if (parsed && typeof parsed === "object") {
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
       return { store: parsed as Record<string, SessionEntryLike>, ok: true };
     }
   } catch {

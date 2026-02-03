@@ -1,8 +1,18 @@
-import crypto from "node:crypto";
 import { spawn } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
+import fsPromises from "node:fs/promises";
 import path from "node:path";
-
+import { resolveAgentConfig } from "../agents/agent-scope.js";
+import { resolveBrowserConfig } from "../browser/config.js";
+import {
+  createBrowserControlContext,
+  startBrowserControlServiceFromConfig,
+} from "../browser/control-service.js";
+import { createBrowserRouteDispatcher } from "../browser/routes/dispatcher.js";
+import { loadConfig } from "../config/config.js";
+import { GatewayClient } from "../gateway/client.js";
+import { loadOrCreateDeviceIdentity } from "../infra/device-identity.js";
 import {
   addAllowlistEntry,
   analyzeArgvCommand,
@@ -17,6 +27,8 @@ import {
   readExecApprovalsSnapshot,
   resolveExecApprovalsSocketPath,
   saveExecApprovals,
+  type ExecAsk,
+  type ExecSecurity,
   type ExecApprovalsFile,
   type ExecAllowlistEntry,
   type ExecCommandSegment,
@@ -28,15 +40,11 @@ import {
   type ExecHostRunResult,
 } from "../infra/exec-host.js";
 import { getMachineDisplayName } from "../infra/machine-name.js";
-import { loadOrCreateDeviceIdentity } from "../infra/device-identity.js";
-import { loadConfig } from "../config/config.js";
-import { resolveAgentConfig } from "../agents/agent-scope.js";
-import { ensureClawdbotCliOnPath } from "../infra/path-env.js";
-import { VERSION } from "../version.js";
+import { ensureOpenClawCliOnPath } from "../infra/path-env.js";
+import { detectMime } from "../media/mime.js";
 import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../utils/message-channel.js";
-
+import { VERSION } from "../version.js";
 import { ensureNodeHostConfig, saveNodeHostConfig, type NodeHostGatewayConfig } from "./config.js";
-import { GatewayClient } from "../gateway/client.js";
 
 type NodeHostRunOptions = {
   gatewayHost: string;
@@ -65,6 +73,26 @@ type SystemWhichParams = {
   bins: string[];
 };
 
+type BrowserProxyParams = {
+  method?: string;
+  path?: string;
+  query?: Record<string, string | number | boolean | null | undefined>;
+  body?: unknown;
+  timeoutMs?: number;
+  profile?: string;
+};
+
+type BrowserProxyFile = {
+  path: string;
+  base64: string;
+  mimeType?: string;
+};
+
+type BrowserProxyResult = {
+  result: unknown;
+  files?: BrowserProxyFile[];
+};
+
 type SystemExecApprovalsSetParams = {
   file: ExecApprovalsFile;
   baseHash?: string | null;
@@ -86,6 +114,14 @@ type RunResult = {
   error?: string | null;
   truncated: boolean;
 };
+
+function resolveExecSecurity(value?: string): ExecSecurity {
+  return value === "deny" || value === "allowlist" || value === "full" ? value : "allowlist";
+}
+
+function resolveExecAsk(value?: string): ExecAsk {
+  return value === "off" || value === "on-miss" || value === "always" ? value : "on-miss";
+}
 
 type ExecEventPayload = {
   sessionKey: string;
@@ -111,10 +147,11 @@ type NodeInvokeRequestPayload = {
 const OUTPUT_CAP = 200_000;
 const OUTPUT_EVENT_TAIL = 20_000;
 const DEFAULT_NODE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+const BROWSER_PROXY_MAX_FILE_BYTES = 10 * 1024 * 1024;
 
-const execHostEnforced = process.env.CLAWDBOT_NODE_EXEC_HOST?.trim().toLowerCase() === "app";
+const execHostEnforced = process.env.OPENCLAW_NODE_EXEC_HOST?.trim().toLowerCase() === "app";
 const execHostFallbackAllowed =
-  process.env.CLAWDBOT_NODE_EXEC_FALLBACK?.trim().toLowerCase() !== "0";
+  process.env.OPENCLAW_NODE_EXEC_FALLBACK?.trim().toLowerCase() !== "0";
 
 const blockedEnvKeys = new Set([
   "NODE_OPTIONS",
@@ -160,16 +197,22 @@ class SkillBinsCache {
 function sanitizeEnv(
   overrides?: Record<string, string> | null,
 ): Record<string, string> | undefined {
-  if (!overrides) return undefined;
+  if (!overrides) {
+    return undefined;
+  }
   const merged = { ...process.env } as Record<string, string>;
   const basePath = process.env.PATH ?? DEFAULT_NODE_PATH;
   for (const [rawKey, value] of Object.entries(overrides)) {
     const key = rawKey.trim();
-    if (!key) continue;
+    if (!key) {
+      continue;
+    }
     const upper = key.toUpperCase();
     if (upper === "PATH") {
       const trimmed = value.trim();
-      if (!trimmed) continue;
+      if (!trimmed) {
+        continue;
+      }
       if (!basePath || trimmed === basePath) {
         merged[key] = trimmed;
         continue;
@@ -180,27 +223,141 @@ function sanitizeEnv(
       }
       continue;
     }
-    if (blockedEnvKeys.has(upper)) continue;
-    if (blockedEnvPrefixes.some((prefix) => upper.startsWith(prefix))) continue;
+    if (blockedEnvKeys.has(upper)) {
+      continue;
+    }
+    if (blockedEnvPrefixes.some((prefix) => upper.startsWith(prefix))) {
+      continue;
+    }
     merged[key] = value;
   }
   return merged;
+}
+
+function normalizeProfileAllowlist(raw?: string[]): string[] {
+  return Array.isArray(raw) ? raw.map((entry) => entry.trim()).filter(Boolean) : [];
+}
+
+function resolveBrowserProxyConfig() {
+  const cfg = loadConfig();
+  const proxy = cfg.nodeHost?.browserProxy;
+  const allowProfiles = normalizeProfileAllowlist(proxy?.allowProfiles);
+  const enabled = proxy?.enabled !== false;
+  return { enabled, allowProfiles };
+}
+
+let browserControlReady: Promise<void> | null = null;
+
+async function ensureBrowserControlService(): Promise<void> {
+  if (browserControlReady) {
+    return browserControlReady;
+  }
+  browserControlReady = (async () => {
+    const cfg = loadConfig();
+    const resolved = resolveBrowserConfig(cfg.browser, cfg);
+    if (!resolved.enabled) {
+      throw new Error("browser control disabled");
+    }
+    const started = await startBrowserControlServiceFromConfig();
+    if (!started) {
+      throw new Error("browser control disabled");
+    }
+  })();
+  return browserControlReady;
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs?: number, label?: string): Promise<T> {
+  const resolved =
+    typeof timeoutMs === "number" && Number.isFinite(timeoutMs)
+      ? Math.max(1, Math.floor(timeoutMs))
+      : undefined;
+  if (!resolved) {
+    return await promise;
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`${label ?? "request"} timed out`));
+    }, resolved);
+  });
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+function isProfileAllowed(params: { allowProfiles: string[]; profile?: string | null }) {
+  const { allowProfiles, profile } = params;
+  if (!allowProfiles.length) {
+    return true;
+  }
+  if (!profile) {
+    return false;
+  }
+  return allowProfiles.includes(profile.trim());
+}
+
+function collectBrowserProxyPaths(payload: unknown): string[] {
+  const paths = new Set<string>();
+  const obj =
+    typeof payload === "object" && payload !== null ? (payload as Record<string, unknown>) : null;
+  if (!obj) {
+    return [];
+  }
+  if (typeof obj.path === "string" && obj.path.trim()) {
+    paths.add(obj.path.trim());
+  }
+  if (typeof obj.imagePath === "string" && obj.imagePath.trim()) {
+    paths.add(obj.imagePath.trim());
+  }
+  const download = obj.download;
+  if (download && typeof download === "object") {
+    const dlPath = (download as Record<string, unknown>).path;
+    if (typeof dlPath === "string" && dlPath.trim()) {
+      paths.add(dlPath.trim());
+    }
+  }
+  return [...paths];
+}
+
+async function readBrowserProxyFile(filePath: string): Promise<BrowserProxyFile | null> {
+  const stat = await fsPromises.stat(filePath).catch(() => null);
+  if (!stat || !stat.isFile()) {
+    return null;
+  }
+  if (stat.size > BROWSER_PROXY_MAX_FILE_BYTES) {
+    throw new Error(
+      `browser proxy file exceeds ${Math.round(BROWSER_PROXY_MAX_FILE_BYTES / (1024 * 1024))}MB`,
+    );
+  }
+  const buffer = await fsPromises.readFile(filePath);
+  const mimeType = await detectMime({ buffer, filePath });
+  return { path: filePath, base64: buffer.toString("base64"), mimeType };
 }
 
 function formatCommand(argv: string[]): string {
   return argv
     .map((arg) => {
       const trimmed = arg.trim();
-      if (!trimmed) return '""';
+      if (!trimmed) {
+        return '""';
+      }
       const needsQuotes = /\s|"/.test(trimmed);
-      if (!needsQuotes) return trimmed;
+      if (!needsQuotes) {
+        return trimmed;
+      }
       return `"${trimmed.replace(/"/g, '\\"')}"`;
     })
     .join(" ");
 }
 
 function truncateOutput(raw: string, maxChars: number): { text: string; truncated: boolean } {
-  if (raw.length <= maxChars) return { text: raw, truncated: false };
+  if (raw.length <= maxChars) {
+    return { text: raw, truncated: false };
+  }
   return { text: `... (truncated) ${raw.slice(raw.length - maxChars)}`, truncated: true };
 }
 
@@ -216,7 +373,9 @@ function requireExecApprovalsBaseHash(
   params: SystemExecApprovalsSetParams,
   snapshot: ExecApprovalsSnapshot,
 ) {
-  if (!snapshot.exists) return;
+  if (!snapshot.exists) {
+    return;
+  }
   if (!snapshot.hash) {
     throw new Error("INVALID_REQUEST: exec approvals base hash unavailable; reload and retry");
   }
@@ -259,9 +418,14 @@ async function runCommand(
       const slice = chunk.length > remaining ? chunk.subarray(0, remaining) : chunk;
       const str = slice.toString("utf8");
       outputLen += slice.length;
-      if (target === "stdout") stdout += str;
-      else stderr += str;
-      if (chunk.length > remaining) truncated = true;
+      if (target === "stdout") {
+        stdout += str;
+      } else {
+        stderr += str;
+      }
+      if (chunk.length > remaining) {
+        truncated = true;
+      }
     };
 
     child.stdout?.on("data", (chunk) => onChunk(chunk as Buffer, "stdout"));
@@ -280,9 +444,13 @@ async function runCommand(
     }
 
     const finalize = (exitCode?: number, error?: string | null) => {
-      if (settled) return;
+      if (settled) {
+        return;
+      }
       settled = true;
-      if (timer) clearTimeout(timer);
+      if (timer) {
+        clearTimeout(timer);
+      }
       resolve({
         exitCode,
         timedOut,
@@ -314,15 +482,19 @@ function resolveEnvPath(env?: Record<string, string>): string[] {
 }
 
 function ensureNodePathEnv(): string {
-  ensureClawdbotCliOnPath({ pathEnv: process.env.PATH ?? "" });
+  ensureOpenClawCliOnPath({ pathEnv: process.env.PATH ?? "" });
   const current = process.env.PATH ?? "";
-  if (current.trim()) return current;
+  if (current.trim()) {
+    return current;
+  }
   process.env.PATH = DEFAULT_NODE_PATH;
   return DEFAULT_NODE_PATH;
 }
 
 function resolveExecutable(bin: string, env?: Record<string, string>) {
-  if (bin.includes("/") || bin.includes("\\")) return null;
+  if (bin.includes("/") || bin.includes("\\")) {
+    return null;
+  }
   const extensions =
     process.platform === "win32"
       ? (process.env.PATHEXT ?? process.env.PathExt ?? ".EXE;.CMD;.BAT;.COM")
@@ -332,7 +504,9 @@ function resolveExecutable(bin: string, env?: Record<string, string>) {
   for (const dir of resolveEnvPath(env)) {
     for (const ext of extensions) {
       const candidate = path.join(dir, bin + ext);
-      if (fs.existsSync(candidate)) return candidate;
+      if (fs.existsSync(candidate)) {
+        return candidate;
+      }
     }
   }
   return null;
@@ -343,15 +517,21 @@ async function handleSystemWhich(params: SystemWhichParams, env?: Record<string,
   const found: Record<string, string> = {};
   for (const bin of bins) {
     const path = resolveExecutable(bin, env);
-    if (path) found[bin] = path;
+    if (path) {
+      found[bin] = path;
+    }
   }
   return { bins: found };
 }
 
 function buildExecEventPayload(payload: ExecEventPayload): ExecEventPayload {
-  if (!payload.output) return payload;
+  if (!payload.output) {
+    return payload;
+  }
   const trimmed = payload.output.trim();
-  if (!trimmed) return payload;
+  if (!trimmed) {
+    return payload;
+  }
   const { text } = truncateOutput(trimmed, OUTPUT_EVENT_TAIL);
   return { ...payload, output: text };
 }
@@ -387,12 +567,15 @@ export async function runNodeHost(opts: NodeHostRunOptions): Promise<void> {
   await saveNodeHostConfig(config);
 
   const cfg = loadConfig();
+  const browserProxy = resolveBrowserProxyConfig();
+  const resolvedBrowser = resolveBrowserConfig(cfg.browser, cfg);
+  const browserProxyEnabled = browserProxy.enabled && resolvedBrowser.enabled;
   const isRemoteMode = cfg.gateway?.mode === "remote";
   const token =
-    process.env.CLAWDBOT_GATEWAY_TOKEN?.trim() ||
+    process.env.OPENCLAW_GATEWAY_TOKEN?.trim() ||
     (isRemoteMode ? cfg.gateway?.remote?.token : cfg.gateway?.auth?.token);
   const password =
-    process.env.CLAWDBOT_GATEWAY_PASSWORD?.trim() ||
+    process.env.OPENCLAW_GATEWAY_PASSWORD?.trim() ||
     (isRemoteMode ? cfg.gateway?.remote?.password : cfg.gateway?.auth?.password);
 
   const host = gateway.host ?? "127.0.0.1";
@@ -415,21 +598,26 @@ export async function runNodeHost(opts: NodeHostRunOptions): Promise<void> {
     mode: GATEWAY_CLIENT_MODES.NODE,
     role: "node",
     scopes: [],
-    caps: ["system"],
+    caps: ["system", ...(browserProxyEnabled ? ["browser"] : [])],
     commands: [
       "system.run",
       "system.which",
       "system.execApprovals.get",
       "system.execApprovals.set",
+      ...(browserProxyEnabled ? ["browser.proxy"] : []),
     ],
     pathEnv,
     permissions: undefined,
     deviceIdentity: loadOrCreateDeviceIdentity(),
     tlsFingerprint: gateway.tlsFingerprint,
     onEvent: (evt) => {
-      if (evt.event !== "node.invoke.request") return;
+      if (evt.event !== "node.invoke.request") {
+        return;
+      }
       const payload = coerceNodeInvokePayload(evt.payload);
-      if (!payload) return;
+      if (!payload) {
+        return;
+      }
       void handleInvoke(payload, client, skillBins);
     },
     onConnectError: (err) => {
@@ -444,10 +632,7 @@ export async function runNodeHost(opts: NodeHostRunOptions): Promise<void> {
   });
 
   const skillBins = new SkillBinsCache(async () => {
-    const res = (await client.request("skills.bins", {})) as
-      | { bins?: unknown[] }
-      | null
-      | undefined;
+    const res = await client.request<{ bins: Array<unknown> }>("skills.bins", {});
     const bins = Array.isArray(res?.bins) ? res.bins.map((bin) => String(bin)) : [];
     return bins;
   });
@@ -477,9 +662,11 @@ async function handleInvoke(
         payloadJSON: JSON.stringify(payload),
       });
     } catch (err) {
+      const message = String(err);
+      const code = message.toLowerCase().includes("timed out") ? "TIMEOUT" : "INVALID_REQUEST";
       await sendInvokeResult(client, frame, {
         ok: false,
-        error: { code: "INVALID_REQUEST", message: String(err) },
+        error: { code, message },
       });
     }
     return;
@@ -549,6 +736,116 @@ async function handleInvoke(
     return;
   }
 
+  if (command === "browser.proxy") {
+    try {
+      const params = decodeParams<BrowserProxyParams>(frame.paramsJSON);
+      const pathValue = typeof params.path === "string" ? params.path.trim() : "";
+      if (!pathValue) {
+        throw new Error("INVALID_REQUEST: path required");
+      }
+      const proxyConfig = resolveBrowserProxyConfig();
+      if (!proxyConfig.enabled) {
+        throw new Error("UNAVAILABLE: node browser proxy disabled");
+      }
+      await ensureBrowserControlService();
+      const cfg = loadConfig();
+      const resolved = resolveBrowserConfig(cfg.browser, cfg);
+      const requestedProfile = typeof params.profile === "string" ? params.profile.trim() : "";
+      const allowedProfiles = proxyConfig.allowProfiles;
+      if (allowedProfiles.length > 0) {
+        if (pathValue !== "/profiles") {
+          const profileToCheck = requestedProfile || resolved.defaultProfile;
+          if (!isProfileAllowed({ allowProfiles: allowedProfiles, profile: profileToCheck })) {
+            throw new Error("INVALID_REQUEST: browser profile not allowed");
+          }
+        } else if (requestedProfile) {
+          if (!isProfileAllowed({ allowProfiles: allowedProfiles, profile: requestedProfile })) {
+            throw new Error("INVALID_REQUEST: browser profile not allowed");
+          }
+        }
+      }
+
+      const method = typeof params.method === "string" ? params.method.toUpperCase() : "GET";
+      const path = pathValue.startsWith("/") ? pathValue : `/${pathValue}`;
+      const body = params.body;
+      const query: Record<string, unknown> = {};
+      if (requestedProfile) {
+        query.profile = requestedProfile;
+      }
+      const rawQuery = params.query ?? {};
+      for (const [key, value] of Object.entries(rawQuery)) {
+        if (value === undefined || value === null) {
+          continue;
+        }
+        query[key] = typeof value === "string" ? value : String(value);
+      }
+      const dispatcher = createBrowserRouteDispatcher(createBrowserControlContext());
+      const response = await withTimeout(
+        dispatcher.dispatch({
+          method: method === "DELETE" ? "DELETE" : method === "POST" ? "POST" : "GET",
+          path,
+          query,
+          body,
+        }),
+        params.timeoutMs,
+        "browser proxy request",
+      );
+      if (response.status >= 400) {
+        const message =
+          response.body && typeof response.body === "object" && "error" in response.body
+            ? String((response.body as { error?: unknown }).error)
+            : `HTTP ${response.status}`;
+        throw new Error(message);
+      }
+      const result = response.body;
+      if (allowedProfiles.length > 0 && path === "/profiles") {
+        const obj =
+          typeof result === "object" && result !== null ? (result as Record<string, unknown>) : {};
+        const profiles = Array.isArray(obj.profiles) ? obj.profiles : [];
+        obj.profiles = profiles.filter((entry) => {
+          if (!entry || typeof entry !== "object") {
+            return false;
+          }
+          const name = (entry as Record<string, unknown>).name;
+          return typeof name === "string" && allowedProfiles.includes(name);
+        });
+      }
+      let files: BrowserProxyFile[] | undefined;
+      const paths = collectBrowserProxyPaths(result);
+      if (paths.length > 0) {
+        const loaded = await Promise.all(
+          paths.map(async (p) => {
+            try {
+              const file = await readBrowserProxyFile(p);
+              if (!file) {
+                throw new Error("file not found");
+              }
+              return file;
+            } catch (err) {
+              throw new Error(`browser proxy file read failed for ${p}: ${String(err)}`, {
+                cause: err,
+              });
+            }
+          }),
+        );
+        if (loaded.length > 0) {
+          files = loaded;
+        }
+      }
+      const payload: BrowserProxyResult = files ? { result, files } : { result };
+      await sendInvokeResult(client, frame, {
+        ok: true,
+        payloadJSON: JSON.stringify(payload),
+      });
+    } catch (err) {
+      await sendInvokeResult(client, frame, {
+        ok: false,
+        error: { code: "INVALID_REQUEST", message: String(err) },
+      });
+    }
+    return;
+  }
+
   if (command !== "system.run") {
     await sendInvokeResult(client, frame, {
       ok: false,
@@ -580,15 +877,20 @@ async function handleInvoke(
   const rawCommand = typeof params.rawCommand === "string" ? params.rawCommand.trim() : "";
   const cmdText = rawCommand || formatCommand(argv);
   const agentId = params.agentId?.trim() || undefined;
-  const approvals = resolveExecApprovals(agentId, { security: "allowlist" });
+  const cfg = loadConfig();
+  const agentExec = agentId ? resolveAgentConfig(cfg, agentId)?.tools?.exec : undefined;
+  const configuredSecurity = resolveExecSecurity(agentExec?.security ?? cfg.tools?.exec?.security);
+  const configuredAsk = resolveExecAsk(agentExec?.ask ?? cfg.tools?.exec?.ask);
+  const approvals = resolveExecApprovals(agentId, {
+    security: configuredSecurity,
+    ask: configuredAsk,
+  });
   const security = approvals.agent.security;
   const ask = approvals.agent.ask;
   const autoAllowSkills = approvals.agent.autoAllowSkills;
   const sessionKey = params.sessionKey?.trim() || "node";
   const runId = params.runId?.trim() || crypto.randomUUID();
   const env = sanitizeEnv(params.env ?? undefined);
-  const cfg = loadConfig();
-  const agentExec = agentId ? resolveAgentConfig(cfg, agentId)?.tools?.exec : undefined;
   const safeBins = resolveSafeBins(agentExec?.safeBins ?? cfg.tools?.exec?.safeBins);
   const bins = autoAllowSkills ? await skillBins.current() : new Set<string>();
   let analysisOk = false;
@@ -763,7 +1065,9 @@ async function handleInvoke(
     if (analysisOk) {
       for (const segment of segments) {
         const pattern = segment.resolution?.resolvedPath ?? "";
-        if (pattern) addAllowlistEntry(approvals.file, agentId, pattern);
+        if (pattern) {
+          addAllowlistEntry(approvals.file, agentId, pattern);
+        }
       }
     }
   }
@@ -790,7 +1094,9 @@ async function handleInvoke(
   if (allowlistMatches.length > 0) {
     const seen = new Set<string>();
     for (const match of allowlistMatches) {
-      if (!match?.pattern || seen.has(match.pattern)) continue;
+      if (!match?.pattern || seen.has(match.pattern)) {
+        continue;
+      }
       seen.add(match.pattern);
       recordAllowlistUse(
         approvals.file,
@@ -872,12 +1178,16 @@ function decodeParams<T>(raw?: string | null): T {
 }
 
 function coerceNodeInvokePayload(payload: unknown): NodeInvokeRequestPayload | null {
-  if (!payload || typeof payload !== "object") return null;
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
   const obj = payload as Record<string, unknown>;
   const id = typeof obj.id === "string" ? obj.id.trim() : "";
   const nodeId = typeof obj.nodeId === "string" ? obj.nodeId.trim() : "";
   const command = typeof obj.command === "string" ? obj.command.trim() : "";
-  if (!id || !nodeId || !command) return null;
+  if (!id || !nodeId || !command) {
+    return null;
+  }
   const paramsJSON =
     typeof obj.paramsJSON === "string"
       ? obj.paramsJSON

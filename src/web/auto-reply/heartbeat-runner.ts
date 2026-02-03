@@ -1,10 +1,11 @@
+import type { ReplyPayload } from "../../auto-reply/types.js";
 import {
   DEFAULT_HEARTBEAT_ACK_MAX_CHARS,
   resolveHeartbeatPrompt,
   stripHeartbeatToken,
 } from "../../auto-reply/heartbeat.js";
 import { getReplyFromConfig } from "../../auto-reply/reply.js";
-import type { ReplyPayload } from "../../auto-reply/types.js";
+import { HEARTBEAT_TOKEN } from "../../auto-reply/tokens.js";
 import { resolveWhatsAppHeartbeatRecipients } from "../../channels/plugins/whatsapp-heartbeat.js";
 import { loadConfig } from "../../config/config.js";
 import {
@@ -13,7 +14,8 @@ import {
   resolveStorePath,
   updateSessionStore,
 } from "../../config/sessions.js";
-import { emitHeartbeatEvent } from "../../infra/heartbeat-events.js";
+import { emitHeartbeatEvent, resolveIndicatorType } from "../../infra/heartbeat-events.js";
+import { resolveHeartbeatVisibility } from "../../infra/heartbeat-visibility.js";
 import { getChildLogger } from "../../logging.js";
 import { normalizeMainKey } from "../../routing/session-key.js";
 import { sendMessageWhatsApp } from "../outbound.js";
@@ -26,11 +28,17 @@ import { elide } from "./util.js";
 function resolveHeartbeatReplyPayload(
   replyResult: ReplyPayload | ReplyPayload[] | undefined,
 ): ReplyPayload | undefined {
-  if (!replyResult) return undefined;
-  if (!Array.isArray(replyResult)) return replyResult;
+  if (!replyResult) {
+    return undefined;
+  }
+  if (!Array.isArray(replyResult)) {
+    return replyResult;
+  }
   for (let idx = replyResult.length - 1; idx >= 0; idx -= 1) {
     const payload = replyResult[idx];
-    if (!payload) continue;
+    if (!payload) {
+      continue;
+    }
     if (payload.text || payload.mediaUrl || (payload.mediaUrls && payload.mediaUrls.length > 0)) {
       return payload;
     }
@@ -59,6 +67,11 @@ export async function runWebHeartbeatOnce(opts: {
   });
 
   const cfg = cfgOverride ?? loadConfig();
+
+  // Resolve heartbeat visibility settings for WhatsApp
+  const visibility = resolveHeartbeatVisibility({ cfg, channel: "whatsapp" });
+  const heartbeatOkText = HEARTBEAT_TOKEN;
+
   const sessionCfg = cfg.session;
   const sessionScope = sessionCfg?.scope ?? "per-sender";
   const mainKey = normalizeMainKey(sessionCfg?.mainKey);
@@ -117,6 +130,8 @@ export async function runWebHeartbeatOnce(opts: {
         to,
         preview: overrideBody.slice(0, 160),
         hasMedia: false,
+        channel: "whatsapp",
+        indicatorType: visibility.useIndicator ? resolveIndicatorType("sent") : undefined,
       });
       heartbeatLogger.info(
         {
@@ -128,6 +143,17 @@ export async function runWebHeartbeatOnce(opts: {
         "manual heartbeat message sent",
       );
       whatsappHeartbeatLog.info(`manual heartbeat sent to ${to} (id ${sendResult.messageId})`);
+      return;
+    }
+
+    if (!visibility.showAlerts && !visibility.showOk && !visibility.useIndicator) {
+      heartbeatLogger.info({ to, reason: "alerts-disabled" }, "heartbeat skipped");
+      emitHeartbeatEvent({
+        status: "skipped",
+        to,
+        reason: "alerts-disabled",
+        channel: "whatsapp",
+      });
       return;
     }
 
@@ -155,7 +181,32 @@ export async function runWebHeartbeatOnce(opts: {
         },
         "heartbeat skipped",
       );
-      emitHeartbeatEvent({ status: "ok-empty", to });
+      let okSent = false;
+      if (visibility.showOk) {
+        if (dryRun) {
+          whatsappHeartbeatLog.info(`[dry-run] heartbeat ok -> ${to}`);
+        } else {
+          const sendResult = await sender(to, heartbeatOkText, { verbose });
+          okSent = true;
+          heartbeatLogger.info(
+            {
+              to,
+              messageId: sendResult.messageId,
+              chars: heartbeatOkText.length,
+              reason: "heartbeat-ok",
+            },
+            "heartbeat ok sent",
+          );
+          whatsappHeartbeatLog.info(`heartbeat ok sent to ${to} (id ${sendResult.messageId})`);
+        }
+      }
+      emitHeartbeatEvent({
+        status: "ok-empty",
+        to,
+        channel: "whatsapp",
+        silent: !okSent,
+        indicatorType: visibility.useIndicator ? resolveIndicatorType("ok-empty") : undefined,
+      });
       return;
     }
 
@@ -176,7 +227,9 @@ export async function runWebHeartbeatOnce(opts: {
         store[sessionSnapshot.key].updatedAt = sessionSnapshot.entry.updatedAt;
         await updateSessionStore(storePath, (nextStore) => {
           const nextEntry = nextStore[sessionSnapshot.key];
-          if (!nextEntry) return;
+          if (!nextEntry) {
+            return;
+          }
           nextStore[sessionSnapshot.key] = {
             ...nextEntry,
             updatedAt: sessionSnapshot.entry.updatedAt,
@@ -188,7 +241,32 @@ export async function runWebHeartbeatOnce(opts: {
         { to, reason: "heartbeat-token", rawLength: replyPayload.text?.length },
         "heartbeat skipped",
       );
-      emitHeartbeatEvent({ status: "ok-token", to });
+      let okSent = false;
+      if (visibility.showOk) {
+        if (dryRun) {
+          whatsappHeartbeatLog.info(`[dry-run] heartbeat ok -> ${to}`);
+        } else {
+          const sendResult = await sender(to, heartbeatOkText, { verbose });
+          okSent = true;
+          heartbeatLogger.info(
+            {
+              to,
+              messageId: sendResult.messageId,
+              chars: heartbeatOkText.length,
+              reason: "heartbeat-ok",
+            },
+            "heartbeat ok sent",
+          );
+          whatsappHeartbeatLog.info(`heartbeat ok sent to ${to} (id ${sendResult.messageId})`);
+        }
+      }
+      emitHeartbeatEvent({
+        status: "ok-token",
+        to,
+        channel: "whatsapp",
+        silent: !okSent,
+        indicatorType: visibility.useIndicator ? resolveIndicatorType("ok-token") : undefined,
+      });
       return;
     }
 
@@ -197,6 +275,22 @@ export async function runWebHeartbeatOnce(opts: {
     }
 
     const finalText = stripped.text || replyPayload.text || "";
+
+    // Check if alerts are disabled for WhatsApp
+    if (!visibility.showAlerts) {
+      heartbeatLogger.info({ to, reason: "alerts-disabled" }, "heartbeat skipped");
+      emitHeartbeatEvent({
+        status: "skipped",
+        to,
+        reason: "alerts-disabled",
+        preview: finalText.slice(0, 200),
+        channel: "whatsapp",
+        hasMedia,
+        indicatorType: visibility.useIndicator ? resolveIndicatorType("sent") : undefined,
+      });
+      return;
+    }
+
     if (dryRun) {
       heartbeatLogger.info({ to, reason: "dry-run", chars: finalText.length }, "heartbeat dry-run");
       whatsappHeartbeatLog.info(`[dry-run] heartbeat -> ${to}: ${elide(finalText, 200)}`);
@@ -209,6 +303,8 @@ export async function runWebHeartbeatOnce(opts: {
       to,
       preview: finalText.slice(0, 160),
       hasMedia,
+      channel: "whatsapp",
+      indicatorType: visibility.useIndicator ? resolveIndicatorType("sent") : undefined,
     });
     heartbeatLogger.info(
       {
@@ -224,7 +320,13 @@ export async function runWebHeartbeatOnce(opts: {
     const reason = formatError(err);
     heartbeatLogger.warn({ to, error: reason }, "heartbeat failed");
     whatsappHeartbeatLog.warn(`heartbeat failed (${reason})`);
-    emitHeartbeatEvent({ status: "failed", to, reason });
+    emitHeartbeatEvent({
+      status: "failed",
+      to,
+      reason,
+      channel: "whatsapp",
+      indicatorType: visibility.useIndicator ? resolveIndicatorType("failed") : undefined,
+    });
     throw err;
   }
 }

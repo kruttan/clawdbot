@@ -1,12 +1,10 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-
 import { beforeEach, describe, expect, it, vi } from "vitest";
-
-import { withTempHome as withTempHomeBase } from "../../test/helpers/temp-home.js";
 import type { CliDeps } from "../cli/deps.js";
-import type { ClawdbotConfig } from "../config/config.js";
+import type { OpenClawConfig } from "../config/config.js";
 import type { CronJob } from "./types.js";
+import { withTempHome as withTempHomeBase } from "../../test/helpers/temp-home.js";
 
 vi.mock("../agents/pi-embedded.js", () => ({
   abortEmbeddedPiRun: vi.fn().mockReturnValue(false),
@@ -22,11 +20,11 @@ import { runEmbeddedPiAgent } from "../agents/pi-embedded.js";
 import { runCronIsolatedAgentTurn } from "./isolated-agent.js";
 
 async function withTempHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
-  return withTempHomeBase(fn, { prefix: "clawdbot-cron-" });
+  return withTempHomeBase(fn, { prefix: "openclaw-cron-" });
 }
 
 async function writeSessionStore(home: string) {
-  const dir = path.join(home, ".clawdbot", "sessions");
+  const dir = path.join(home, ".openclaw", "sessions");
   await fs.mkdir(dir, { recursive: true });
   const storePath = path.join(dir, "sessions.json");
   await fs.writeFile(
@@ -57,17 +55,17 @@ async function readSessionEntry(storePath: string, key: string) {
 function makeCfg(
   home: string,
   storePath: string,
-  overrides: Partial<ClawdbotConfig> = {},
-): ClawdbotConfig {
-  const base: ClawdbotConfig = {
+  overrides: Partial<OpenClawConfig> = {},
+): OpenClawConfig {
+  const base: OpenClawConfig = {
     agents: {
       defaults: {
         model: "anthropic/claude-opus-4-5",
-        workspace: path.join(home, "clawd"),
+        workspace: path.join(home, "openclaw"),
       },
     },
     session: { store: storePath, mainKey: "main" },
-  } as ClawdbotConfig;
+  } as OpenClawConfig;
   return { ...base, ...overrides };
 }
 
@@ -125,6 +123,43 @@ describe("runCronIsolatedAgentTurn", () => {
     });
   });
 
+  it("appends current time after the cron header line", async () => {
+    await withTempHome(async (home) => {
+      const storePath = await writeSessionStore(home);
+      const deps: CliDeps = {
+        sendMessageWhatsApp: vi.fn(),
+        sendMessageTelegram: vi.fn(),
+        sendMessageDiscord: vi.fn(),
+        sendMessageSignal: vi.fn(),
+        sendMessageIMessage: vi.fn(),
+      };
+      vi.mocked(runEmbeddedPiAgent).mockResolvedValue({
+        payloads: [{ text: "ok" }],
+        meta: {
+          durationMs: 5,
+          agentMeta: { sessionId: "s", provider: "p", model: "m" },
+        },
+      });
+
+      await runCronIsolatedAgentTurn({
+        cfg: makeCfg(home, storePath),
+        deps,
+        job: makeJob({ kind: "agentTurn", message: "do it", deliver: false }),
+        message: "do it",
+        sessionKey: "cron:job-1",
+        lane: "cron",
+      });
+
+      const call = vi.mocked(runEmbeddedPiAgent).mock.calls.at(-1)?.[0] as {
+        prompt?: string;
+      };
+      const lines = call?.prompt?.split("\n") ?? [];
+      expect(lines[0]).toContain("[cron:job-1");
+      expect(lines[0]).toContain("do it");
+      expect(lines[1]).toMatch(/^Current time: .+ \(.+\)$/);
+    });
+  });
+
   it("uses agentId for workspace, session key, and store paths", async () => {
     await withTempHome(async (home) => {
       const deps: CliDeps = {
@@ -145,7 +180,7 @@ describe("runCronIsolatedAgentTurn", () => {
 
       const cfg = makeCfg(
         home,
-        path.join(home, ".clawdbot", "agents", "{agentId}", "sessions", "sessions.json"),
+        path.join(home, ".openclaw", "agents", "{agentId}", "sessions", "sessions.json"),
         {
           agents: {
             defaults: { workspace: path.join(home, "default-workspace") },
@@ -268,6 +303,80 @@ describe("runCronIsolatedAgentTurn", () => {
       };
       expect(call?.provider).toBe("openrouter");
       expect(call?.model).toBe("meta-llama/llama-3.3-70b:free");
+    });
+  });
+
+  it("wraps external hook content by default", async () => {
+    await withTempHome(async (home) => {
+      const storePath = await writeSessionStore(home);
+      const deps: CliDeps = {
+        sendMessageWhatsApp: vi.fn(),
+        sendMessageTelegram: vi.fn(),
+        sendMessageDiscord: vi.fn(),
+        sendMessageSignal: vi.fn(),
+        sendMessageIMessage: vi.fn(),
+      };
+      vi.mocked(runEmbeddedPiAgent).mockResolvedValue({
+        payloads: [{ text: "ok" }],
+        meta: {
+          durationMs: 5,
+          agentMeta: { sessionId: "s", provider: "p", model: "m" },
+        },
+      });
+
+      const res = await runCronIsolatedAgentTurn({
+        cfg: makeCfg(home, storePath),
+        deps,
+        job: makeJob({ kind: "agentTurn", message: "Hello" }),
+        message: "Hello",
+        sessionKey: "hook:gmail:msg-1",
+        lane: "cron",
+      });
+
+      expect(res.status).toBe("ok");
+      const call = vi.mocked(runEmbeddedPiAgent).mock.calls[0]?.[0] as { prompt?: string };
+      expect(call?.prompt).toContain("EXTERNAL, UNTRUSTED");
+      expect(call?.prompt).toContain("Hello");
+    });
+  });
+
+  it("skips external content wrapping when hooks.gmail opts out", async () => {
+    await withTempHome(async (home) => {
+      const storePath = await writeSessionStore(home);
+      const deps: CliDeps = {
+        sendMessageWhatsApp: vi.fn(),
+        sendMessageTelegram: vi.fn(),
+        sendMessageDiscord: vi.fn(),
+        sendMessageSignal: vi.fn(),
+        sendMessageIMessage: vi.fn(),
+      };
+      vi.mocked(runEmbeddedPiAgent).mockResolvedValue({
+        payloads: [{ text: "ok" }],
+        meta: {
+          durationMs: 5,
+          agentMeta: { sessionId: "s", provider: "p", model: "m" },
+        },
+      });
+
+      const res = await runCronIsolatedAgentTurn({
+        cfg: makeCfg(home, storePath, {
+          hooks: {
+            gmail: {
+              allowUnsafeExternalContent: true,
+            },
+          },
+        }),
+        deps,
+        job: makeJob({ kind: "agentTurn", message: "Hello" }),
+        message: "Hello",
+        sessionKey: "hook:gmail:msg-2",
+        lane: "cron",
+      });
+
+      expect(res.status).toBe("ok");
+      const call = vi.mocked(runEmbeddedPiAgent).mock.calls[0]?.[0] as { prompt?: string };
+      expect(call?.prompt).not.toContain("EXTERNAL, UNTRUSTED");
+      expect(call?.prompt).toContain("Hello");
     });
   });
 

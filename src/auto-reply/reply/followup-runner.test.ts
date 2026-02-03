@@ -2,9 +2,8 @@ import fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-
-import type { SessionEntry } from "../../config/sessions.js";
 import type { FollowupRun } from "./queue.js";
+import { loadSessionStore, saveSessionStore, type SessionEntry } from "../../config/sessions.js";
 import { createMockTypingController } from "./test-helpers.js";
 
 const runEmbeddedPiAgentMock = vi.fn();
@@ -64,7 +63,7 @@ const baseQueuedRun = (messageProvider = "whatsapp"): FollowupRun =>
 describe("createFollowupRunner compaction", () => {
   it("adds verbose auto-compaction notice and tracks count", async () => {
     const storePath = path.join(
-      await fs.mkdtemp(path.join(tmpdir(), "clawdbot-compaction-")),
+      await fs.mkdtemp(path.join(tmpdir(), "openclaw-compaction-")),
       "sessions.json",
     );
     const sessionEntry: SessionEntry = {
@@ -194,5 +193,48 @@ describe("createFollowupRunner messaging tool dedupe", () => {
     await runner(baseQueuedRun("slack"));
 
     expect(onBlockReply).not.toHaveBeenCalled();
+  });
+
+  it("persists usage even when replies are suppressed", async () => {
+    const storePath = path.join(
+      await fs.mkdtemp(path.join(tmpdir(), "openclaw-followup-usage-")),
+      "sessions.json",
+    );
+    const sessionKey = "main";
+    const sessionEntry: SessionEntry = { sessionId: "session", updatedAt: Date.now() };
+    const sessionStore: Record<string, SessionEntry> = { [sessionKey]: sessionEntry };
+    await saveSessionStore(storePath, sessionStore);
+
+    const onBlockReply = vi.fn(async () => {});
+    runEmbeddedPiAgentMock.mockResolvedValueOnce({
+      payloads: [{ text: "hello world!" }],
+      messagingToolSentTexts: ["different message"],
+      messagingToolSentTargets: [{ tool: "slack", provider: "slack", to: "channel:C1" }],
+      meta: {
+        agentMeta: {
+          usage: { input: 10, output: 5 },
+          model: "claude-opus-4-5",
+          provider: "anthropic",
+        },
+      },
+    });
+
+    const runner = createFollowupRunner({
+      opts: { onBlockReply },
+      typing: createMockTypingController(),
+      typingMode: "instant",
+      sessionEntry,
+      sessionStore,
+      sessionKey,
+      storePath,
+      defaultModel: "anthropic/claude-opus-4-5",
+    });
+
+    await runner(baseQueuedRun("slack"));
+
+    expect(onBlockReply).not.toHaveBeenCalled();
+    const store = loadSessionStore(storePath, { skipCache: true });
+    expect(store[sessionKey]?.totalTokens ?? 0).toBeGreaterThan(0);
+    expect(store[sessionKey]?.model).toBe("claude-opus-4-5");
   });
 });

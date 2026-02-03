@@ -1,11 +1,11 @@
 import { render } from "lit";
 import { describe, expect, it, vi } from "vitest";
-
 import { renderConfig } from "./config";
 
 describe("config view", () => {
   const baseProps = () => ({
     raw: "{\n}\n",
+    originalRaw: "{\n}\n",
     valid: true,
     issues: [],
     loading: false,
@@ -37,7 +37,7 @@ describe("config view", () => {
     onSubsectionChange: vi.fn(),
   });
 
-  it("disables save when form is unsafe", () => {
+  it("allows save when form is unsafe", () => {
     const container = document.createElement("div");
     render(
       renderConfig({
@@ -58,138 +58,144 @@ describe("config view", () => {
       container,
     );
 
-    const saveButton = Array.from(
-      container.querySelectorAll("button"),
-    ).find((btn) => btn.textContent?.trim() === "Save") as
-      | HTMLButtonElement
-      | undefined;
+    const saveButton = Array.from(container.querySelectorAll("button")).find(
+      (btn) => btn.textContent?.trim() === "Save",
+    );
     expect(saveButton).not.toBeUndefined();
-    expect(saveButton?.disabled).toBe(true);
+    expect(saveButton?.disabled).toBe(false);
   });
 
-  it("applies MiniMax preset via onRawChange + onFormPatch", () => {
+  it("disables save when schema is missing", () => {
     const container = document.createElement("div");
-    const onRawChange = vi.fn();
-    const onFormPatch = vi.fn();
     render(
       renderConfig({
         ...baseProps(),
-        onRawChange,
-        onFormPatch,
+        schema: null,
+        formMode: "form",
+        formValue: { gateway: { mode: "local" } },
+        originalValue: {},
       }),
       container,
     );
 
-    const btn = Array.from(container.querySelectorAll("button")).find((b) =>
-      b.textContent?.includes("MiniMax M2.1"),
-    ) as HTMLButtonElement | undefined;
-    expect(btn).toBeTruthy();
-    btn?.click();
-
-    expect(onRawChange).toHaveBeenCalled();
-    const raw = String(onRawChange.mock.calls.at(-1)?.[0] ?? "");
-    expect(raw).toContain("https://api.minimax.io/anthropic");
-    expect(raw).toContain("anthropic-messages");
-    expect(raw).toContain("minimax/MiniMax-M2.1");
-    expect(raw).toContain("MINIMAX_API_KEY");
-
-    expect(onFormPatch).toHaveBeenCalledWith(
-      ["agents", "defaults", "model", "primary"],
-      "minimax/MiniMax-M2.1",
+    const saveButton = Array.from(container.querySelectorAll("button")).find(
+      (btn) => btn.textContent?.trim() === "Save",
     );
+    expect(saveButton).not.toBeUndefined();
+    expect(saveButton?.disabled).toBe(true);
   });
 
-  it("does not clobber existing MiniMax apiKey when applying preset", () => {
+  it("disables save and apply when raw is unchanged", () => {
     const container = document.createElement("div");
-    const onRawChange = vi.fn();
     render(
       renderConfig({
         ...baseProps(),
-        onRawChange,
-        formValue: {
-          models: {
-            mode: "merge",
-            providers: {
-              minimax: {
-                apiKey: "EXISTING_KEY",
-              },
-            },
+        formMode: "raw",
+        raw: "{\n}\n",
+        originalRaw: "{\n}\n",
+      }),
+      container,
+    );
+
+    const saveButton = Array.from(container.querySelectorAll("button")).find(
+      (btn) => btn.textContent?.trim() === "Save",
+    );
+    const applyButton = Array.from(container.querySelectorAll("button")).find(
+      (btn) => btn.textContent?.trim() === "Apply",
+    );
+    expect(saveButton).not.toBeUndefined();
+    expect(applyButton).not.toBeUndefined();
+    expect(saveButton?.disabled).toBe(true);
+    expect(applyButton?.disabled).toBe(true);
+  });
+
+  it("enables save and apply when raw changes", () => {
+    const container = document.createElement("div");
+    render(
+      renderConfig({
+        ...baseProps(),
+        formMode: "raw",
+        raw: '{\n  gateway: { mode: "local" }\n}\n',
+        originalRaw: "{\n}\n",
+      }),
+      container,
+    );
+
+    const saveButton = Array.from(container.querySelectorAll("button")).find(
+      (btn) => btn.textContent?.trim() === "Save",
+    );
+    const applyButton = Array.from(container.querySelectorAll("button")).find(
+      (btn) => btn.textContent?.trim() === "Apply",
+    );
+    expect(saveButton).not.toBeUndefined();
+    expect(applyButton).not.toBeUndefined();
+    expect(saveButton?.disabled).toBe(false);
+    expect(applyButton?.disabled).toBe(false);
+  });
+
+  it("switches mode via the sidebar toggle", () => {
+    const container = document.createElement("div");
+    const onFormModeChange = vi.fn();
+    render(
+      renderConfig({
+        ...baseProps(),
+        onFormModeChange,
+      }),
+      container,
+    );
+
+    const btn = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent?.trim() === "Raw",
+    );
+    expect(btn).toBeTruthy();
+    btn?.click();
+    expect(onFormModeChange).toHaveBeenCalledWith("raw");
+  });
+
+  it("switches sections from the sidebar", () => {
+    const container = document.createElement("div");
+    const onSectionChange = vi.fn();
+    render(
+      renderConfig({
+        ...baseProps(),
+        onSectionChange,
+        schema: {
+          type: "object",
+          properties: {
+            gateway: { type: "object", properties: {} },
+            agents: { type: "object", properties: {} },
           },
         },
       }),
       container,
     );
 
-    const btn = Array.from(container.querySelectorAll("button")).find((b) =>
-      b.textContent?.includes("MiniMax M2.1"),
-    ) as HTMLButtonElement | undefined;
+    const btn = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent?.trim() === "Gateway",
+    );
     expect(btn).toBeTruthy();
     btn?.click();
-
-    const raw = String(onRawChange.mock.calls.at(-1)?.[0] ?? "");
-    expect(raw).toContain("EXISTING_KEY");
+    expect(onSectionChange).toHaveBeenCalledWith("gateway");
   });
 
-  it("applies Z.AI (GLM 4.7) preset", () => {
+  it("wires search input to onSearchChange", () => {
     const container = document.createElement("div");
-    const onRawChange = vi.fn();
-    const onFormPatch = vi.fn();
+    const onSearchChange = vi.fn();
     render(
       renderConfig({
         ...baseProps(),
-        onRawChange,
-        onFormPatch,
+        onSearchChange,
       }),
       container,
     );
 
-    const btn = Array.from(container.querySelectorAll("button")).find((b) =>
-      b.textContent?.includes("GLM 4.7"),
-    ) as HTMLButtonElement | undefined;
-    expect(btn).toBeTruthy();
-    btn?.click();
-
-    const raw = String(onRawChange.mock.calls.at(-1)?.[0] ?? "");
-    expect(raw).toContain("zai/glm-4.7");
-    expect(raw).toContain("ZAI_API_KEY");
-    expect(onFormPatch).toHaveBeenCalledWith(
-      ["agents", "defaults", "model", "primary"],
-      "zai/glm-4.7",
-    );
-  });
-
-  it("applies Moonshot (Kimi) preset", () => {
-    const container = document.createElement("div");
-    const onRawChange = vi.fn();
-    const onFormPatch = vi.fn();
-    render(
-      renderConfig({
-        ...baseProps(),
-        onRawChange,
-        onFormPatch,
-      }),
-      container,
-    );
-
-    const btn = Array.from(container.querySelectorAll("button")).find((b) =>
-      b.textContent?.includes("Kimi"),
-    ) as HTMLButtonElement | undefined;
-    expect(btn).toBeTruthy();
-    btn?.click();
-
-    const raw = String(onRawChange.mock.calls.at(-1)?.[0] ?? "");
-    expect(raw).toContain("https://api.moonshot.ai/v1");
-    expect(raw).toContain("moonshot/kimi-k2-0905-preview");
-    expect(raw).toContain("moonshot/kimi-k2-turbo-preview");
-    expect(raw).toContain("moonshot/kimi-k2-thinking");
-    expect(raw).toContain("moonshot/kimi-k2-thinking-turbo");
-    expect(raw).toContain("Kimi K2 Turbo");
-    expect(raw).toContain("Kimi K2 Thinking");
-    expect(raw).toContain("Kimi K2 Thinking Turbo");
-    expect(raw).toContain("MOONSHOT_API_KEY");
-    expect(onFormPatch).toHaveBeenCalledWith(
-      ["agents", "defaults", "model", "primary"],
-      "moonshot/kimi-k2-0905-preview",
-    );
+    const input = container.querySelector(".config-search__input");
+    expect(input).not.toBeNull();
+    if (!input) {
+      return;
+    }
+    input.value = "gateway";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(onSearchChange).toHaveBeenCalledWith("gateway");
   });
 });

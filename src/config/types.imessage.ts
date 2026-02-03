@@ -4,7 +4,9 @@ import type {
   GroupPolicy,
   MarkdownConfig,
 } from "./types.base.js";
+import type { ChannelHeartbeatVisibilityConfig } from "./types.channels.js";
 import type { DmConfig } from "./types.messages.js";
+import type { GroupToolPolicyBySenderConfig, GroupToolPolicyConfig } from "./types.tools.js";
 
 export type IMessageAccountConfig = {
   /** Optional display name for this account (used in CLI/UI lists). */
@@ -21,7 +23,7 @@ export type IMessageAccountConfig = {
   cliPath?: string;
   /** Optional Messages db path override. */
   dbPath?: string;
-  /** Remote host for SCP when attachments live on a different machine (e.g., clawdbot@192.168.64.3). */
+  /** Remote host for SCP when attachments live on a different machine (e.g., openclaw@192.168.64.3). */
   remoteHost?: string;
   /** Optional default send service (imessage|sms|auto). */
   service?: "imessage" | "sms" | "auto";
@@ -52,6 +54,8 @@ export type IMessageAccountConfig = {
   mediaMaxMb?: number;
   /** Outbound text chunk size (chars). Default: 4000. */
   textChunkLimit?: number;
+  /** Chunking mode: "length" (default) splits by size; "newline" splits on every newline. */
+  chunkMode?: "length" | "newline";
   blockStreaming?: boolean;
   /** Merge streamed block replies before sending. */
   blockStreamingCoalesce?: BlockStreamingCoalesceConfig;
@@ -59,8 +63,12 @@ export type IMessageAccountConfig = {
     string,
     {
       requireMention?: boolean;
+      tools?: GroupToolPolicyConfig;
+      toolsBySender?: GroupToolPolicyBySenderConfig;
     }
   >;
+  /** Heartbeat visibility settings for this channel. */
+  heartbeat?: ChannelHeartbeatVisibilityConfig;
 };
 
 export type IMessageConfig = {

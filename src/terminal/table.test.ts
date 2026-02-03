@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-
 import { visibleWidth } from "./ansi.js";
 import { renderTable } from "./table.js";
 
@@ -50,14 +49,18 @@ describe("renderTable", () => {
 
     const ESC = "\u001b";
     for (let i = 0; i < out.length; i += 1) {
-      if (out[i] !== ESC) continue;
+      if (out[i] !== ESC) {
+        continue;
+      }
 
       // SGR: ESC [ ... m
       if (out[i + 1] === "[") {
         let j = i + 2;
         while (j < out.length) {
           const ch = out[j];
-          if (ch === "m") break;
+          if (ch === "m") {
+            break;
+          }
           if (ch && ch >= "0" && ch <= "9") {
             j += 1;
             continue;
@@ -82,6 +85,31 @@ describe("renderTable", () => {
       }
 
       throw new Error(`Unexpected escape sequence at index ${i}`);
+    }
+  });
+
+  it("resets ANSI styling on wrapped lines", () => {
+    const reset = "\x1b[0m";
+    const out = renderTable({
+      width: 24,
+      columns: [
+        { key: "K", header: "K", minWidth: 3 },
+        { key: "V", header: "V", flex: true, minWidth: 10 },
+      ],
+      rows: [
+        {
+          K: "X",
+          V: `\x1b[31m${"a".repeat(80)}${reset}`,
+        },
+      ],
+    });
+
+    const lines = out.split("\n").filter((line) => line.includes("a"));
+    for (const line of lines) {
+      const resetIndex = line.lastIndexOf(reset);
+      const lastSep = line.lastIndexOf("│");
+      expect(resetIndex).toBeGreaterThan(-1);
+      expect(lastSep).toBeGreaterThan(resetIndex);
     }
   });
 

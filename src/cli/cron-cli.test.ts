@@ -2,7 +2,9 @@ import { Command } from "commander";
 import { describe, expect, it, vi } from "vitest";
 
 const callGatewayFromCli = vi.fn(async (method: string, _opts: unknown, params?: unknown) => {
-  if (method === "cron.status") return { enabled: true };
+  if (method === "cron.status") {
+    return { enabled: true };
+  }
   return { ok: true, params };
 });
 
@@ -162,7 +164,7 @@ describe("cron cli", () => {
 
     const updateCall = callGatewayFromCli.mock.calls.find((call) => call[0] === "cron.update");
     const patch = updateCall?.[2] as { patch?: { agentId?: unknown } };
-    expect(patch?.patch?.agentId).toBe("Ops");
+    expect(patch?.patch?.agentId).toBe("ops");
 
     callGatewayFromCli.mockClear();
     await program.parseAsync(["cron", "edit", "job-2", "--clear-agent"], {

@@ -1,10 +1,11 @@
 import type { ChannelId } from "../channels/plugins/types.js";
-import type { InternalMessageChannel } from "../utils/message-channel.js";
-import type { CommandArgs } from "./commands-registry.types.js";
 import type {
   MediaUnderstandingDecision,
   MediaUnderstandingOutput,
 } from "../media-understanding/types.js";
+import type { StickerMetadata } from "../telegram/bot/types.js";
+import type { InternalMessageChannel } from "../utils/message-channel.js";
+import type { CommandArgs } from "./commands-registry.types.js";
 
 /** Valid message channels for routing. */
 export type OriginatingChannelType = ChannelId | InternalMessageChannel;
@@ -48,6 +49,7 @@ export type MsgContext = {
   ReplyToIdFull?: string;
   ReplyToBody?: string;
   ReplyToSender?: string;
+  ReplyToIsQuote?: boolean;
   ForwardedFrom?: string;
   ForwardedFromType?: string;
   ForwardedFromId?: string;
@@ -64,13 +66,16 @@ export type MsgContext = {
   MediaPaths?: string[];
   MediaUrls?: string[];
   MediaTypes?: string[];
+  /** Telegram sticker metadata (emoji, set name, file IDs, cached description). */
+  Sticker?: StickerMetadata;
   OutputDir?: string;
   OutputBase?: string;
-  /** Remote host for SCP when media lives on a different machine (e.g., clawdbot@192.168.64.3). */
+  /** Remote host for SCP when media lives on a different machine (e.g., openclaw@192.168.64.3). */
   MediaRemoteHost?: string;
   Transcript?: string;
   MediaUnderstanding?: MediaUnderstandingOutput[];
   MediaUnderstandingDecisions?: MediaUnderstandingDecision[];
+  LinkUnderstanding?: string[];
   Prompt?: string;
   MaxChars?: number;
   ChatType?: string;
@@ -87,6 +92,7 @@ export type MsgContext = {
   SenderUsername?: string;
   SenderTag?: string;
   SenderE164?: string;
+  Timestamp?: number;
   /** Provider label (e.g. whatsapp, telegram). */
   Provider?: string;
   /** Provider surface label (e.g. discord, slack). Prefer this over `Provider` when available. */
@@ -132,8 +138,12 @@ export type TemplateContext = MsgContext & {
 };
 
 function formatTemplateValue(value: unknown): string {
-  if (value == null) return "";
-  if (typeof value === "string") return value;
+  if (value == null) {
+    return "";
+  }
+  if (typeof value === "string") {
+    return value;
+  }
   if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
     return String(value);
   }
@@ -143,8 +153,12 @@ function formatTemplateValue(value: unknown): string {
   if (Array.isArray(value)) {
     return value
       .flatMap((entry) => {
-        if (entry == null) return [];
-        if (typeof entry === "string") return [entry];
+        if (entry == null) {
+          return [];
+        }
+        if (typeof entry === "string") {
+          return [entry];
+        }
         if (typeof entry === "number" || typeof entry === "boolean" || typeof entry === "bigint") {
           return [String(entry)];
         }
@@ -160,7 +174,9 @@ function formatTemplateValue(value: unknown): string {
 
 // Simple {{Placeholder}} interpolation using inbound message context.
 export function applyTemplate(str: string | undefined, ctx: TemplateContext) {
-  if (!str) return "";
+  if (!str) {
+    return "";
+  }
   return str.replace(/{{\s*(\w+)\s*}}/g, (_, key) => {
     const value = ctx[key as keyof TemplateContext];
     return formatTemplateValue(value);

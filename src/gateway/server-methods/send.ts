@@ -1,11 +1,15 @@
-import { getChannelPlugin, normalizeChannelId } from "../../channels/plugins/index.js";
-import type { ChannelId } from "../../channels/plugins/types.js";
-import { DEFAULT_CHAT_CHANNEL } from "../../channels/registry.js";
-import { loadConfig } from "../../config/config.js";
-import { createOutboundSendDeps } from "../../cli/deps.js";
-import { deliverOutboundPayloads } from "../../infra/outbound/deliver.js";
+import type { GatewayRequestContext, GatewayRequestHandlers } from "./types.js";
 import { resolveSessionAgentId } from "../../agents/agent-scope.js";
-import type { OutboundChannel } from "../../infra/outbound/targets.js";
+import { getChannelPlugin, normalizeChannelId } from "../../channels/plugins/index.js";
+import { DEFAULT_CHAT_CHANNEL } from "../../channels/registry.js";
+import { createOutboundSendDeps } from "../../cli/deps.js";
+import { loadConfig } from "../../config/config.js";
+import { deliverOutboundPayloads } from "../../infra/outbound/deliver.js";
+import {
+  ensureOutboundSessionEntry,
+  resolveOutboundSessionRoute,
+} from "../../infra/outbound/outbound-session.js";
+import { normalizeReplyPayloadsForDelivery } from "../../infra/outbound/payloads.js";
 import { resolveOutboundTarget } from "../../infra/outbound/targets.js";
 import { normalizePollInput } from "../../polls.js";
 import {
@@ -16,7 +20,6 @@ import {
   validateSendParams,
 } from "../protocol/index.js";
 import { formatForLog } from "../ws-log.js";
-import type { GatewayRequestContext, GatewayRequestHandlers } from "./types.js";
 
 type InflightResult = {
   ok: boolean;
@@ -41,7 +44,7 @@ const getInflightMap = (context: GatewayRequestContext) => {
 
 export const sendHandlers: GatewayRequestHandlers = {
   send: async ({ params, respond, context }) => {
-    const p = params as Record<string, unknown>;
+    const p = params;
     if (!validateSendParams(p)) {
       respond(
         false,
@@ -57,6 +60,7 @@ export const sendHandlers: GatewayRequestHandlers = {
       to: string;
       message: string;
       mediaUrl?: string;
+      mediaUrls?: string[];
       gifPlayback?: boolean;
       channel?: string;
       accountId?: string;
@@ -82,6 +86,7 @@ export const sendHandlers: GatewayRequestHandlers = {
     }
     const to = request.to.trim();
     const message = request.message.trim();
+    const mediaUrls = Array.isArray(request.mediaUrls) ? request.mediaUrls : undefined;
     const channelInput = typeof request.channel === "string" ? request.channel : undefined;
     const normalizedChannel = channelInput ? normalizeChannelId(channelInput) : null;
     if (channelInput && !normalizedChannel) {
@@ -97,8 +102,8 @@ export const sendHandlers: GatewayRequestHandlers = {
       typeof request.accountId === "string" && request.accountId.trim().length
         ? request.accountId.trim()
         : undefined;
-    const outboundChannel = channel as Exclude<OutboundChannel, "none">;
-    const plugin = getChannelPlugin(channel as ChannelId);
+    const outboundChannel = channel;
+    const plugin = getChannelPlugin(channel);
     if (!plugin) {
       respond(
         false,
@@ -126,24 +131,61 @@ export const sendHandlers: GatewayRequestHandlers = {
           };
         }
         const outboundDeps = context.deps ? createOutboundSendDeps(context.deps) : undefined;
+        const mirrorPayloads = normalizeReplyPayloadsForDelivery([
+          { text: message, mediaUrl: request.mediaUrl, mediaUrls },
+        ]);
+        const mirrorText = mirrorPayloads
+          .map((payload) => payload.text)
+          .filter(Boolean)
+          .join("\n");
+        const mirrorMediaUrls = mirrorPayloads.flatMap(
+          (payload) => payload.mediaUrls ?? (payload.mediaUrl ? [payload.mediaUrl] : []),
+        );
+        const providedSessionKey =
+          typeof request.sessionKey === "string" && request.sessionKey.trim()
+            ? request.sessionKey.trim().toLowerCase()
+            : undefined;
+        const derivedAgentId = resolveSessionAgentId({ config: cfg });
+        // If callers omit sessionKey, derive a target session key from the outbound route.
+        const derivedRoute = !providedSessionKey
+          ? await resolveOutboundSessionRoute({
+              cfg,
+              channel,
+              agentId: derivedAgentId,
+              accountId,
+              target: resolved.to,
+            })
+          : null;
+        if (derivedRoute) {
+          await ensureOutboundSessionEntry({
+            cfg,
+            agentId: derivedAgentId,
+            channel,
+            accountId,
+            route: derivedRoute,
+          });
+        }
         const results = await deliverOutboundPayloads({
           cfg,
           channel: outboundChannel,
           to: resolved.to,
           accountId,
-          payloads: [{ text: message, mediaUrl: request.mediaUrl }],
+          payloads: [{ text: message, mediaUrl: request.mediaUrl, mediaUrls }],
           gifPlayback: request.gifPlayback,
           deps: outboundDeps,
-          mirror:
-            typeof request.sessionKey === "string" && request.sessionKey.trim()
+          mirror: providedSessionKey
+            ? {
+                sessionKey: providedSessionKey,
+                agentId: resolveSessionAgentId({ sessionKey: providedSessionKey, config: cfg }),
+                text: mirrorText || message,
+                mediaUrls: mirrorMediaUrls.length > 0 ? mirrorMediaUrls : undefined,
+              }
+            : derivedRoute
               ? {
-                  sessionKey: request.sessionKey.trim(),
-                  agentId: resolveSessionAgentId({
-                    sessionKey: request.sessionKey.trim(),
-                    config: cfg,
-                  }),
-                  text: message,
-                  mediaUrls: request.mediaUrl ? [request.mediaUrl] : undefined,
+                  sessionKey: derivedRoute.sessionKey,
+                  agentId: derivedAgentId,
+                  text: mirrorText || message,
+                  mediaUrls: mirrorMediaUrls.length > 0 ? mirrorMediaUrls : undefined,
                 }
               : undefined,
         });
@@ -157,9 +199,15 @@ export const sendHandlers: GatewayRequestHandlers = {
           messageId: result.messageId,
           channel,
         };
-        if ("chatId" in result) payload.chatId = result.chatId;
-        if ("channelId" in result) payload.channelId = result.channelId;
-        if ("toJid" in result) payload.toJid = result.toJid;
+        if ("chatId" in result) {
+          payload.chatId = result.chatId;
+        }
+        if ("channelId" in result) {
+          payload.channelId = result.channelId;
+        }
+        if ("toJid" in result) {
+          payload.toJid = result.toJid;
+        }
         if ("conversationId" in result) {
           payload.conversationId = result.conversationId;
         }
@@ -193,7 +241,7 @@ export const sendHandlers: GatewayRequestHandlers = {
     }
   },
   poll: async ({ params, respond, context }) => {
-    const p = params as Record<string, unknown>;
+    const p = params;
     if (!validatePollParams(p)) {
       respond(
         false,
@@ -246,7 +294,7 @@ export const sendHandlers: GatewayRequestHandlers = {
         ? request.accountId.trim()
         : undefined;
     try {
-      const plugin = getChannelPlugin(channel as ChannelId);
+      const plugin = getChannelPlugin(channel);
       const outbound = plugin?.outbound;
       if (!outbound?.sendPoll) {
         respond(
@@ -258,7 +306,7 @@ export const sendHandlers: GatewayRequestHandlers = {
       }
       const cfg = loadConfig();
       const resolved = resolveOutboundTarget({
-        channel: channel as Exclude<OutboundChannel, "none">,
+        channel: channel,
         to,
         cfg,
         accountId,
@@ -282,10 +330,18 @@ export const sendHandlers: GatewayRequestHandlers = {
         messageId: result.messageId,
         channel,
       };
-      if (result.toJid) payload.toJid = result.toJid;
-      if (result.channelId) payload.channelId = result.channelId;
-      if (result.conversationId) payload.conversationId = result.conversationId;
-      if (result.pollId) payload.pollId = result.pollId;
+      if (result.toJid) {
+        payload.toJid = result.toJid;
+      }
+      if (result.channelId) {
+        payload.channelId = result.channelId;
+      }
+      if (result.conversationId) {
+        payload.conversationId = result.conversationId;
+      }
+      if (result.pollId) {
+        payload.pollId = result.pollId;
+      }
       context.dedupe.set(`poll:${idem}`, {
         ts: Date.now(),
         ok: true,

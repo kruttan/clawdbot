@@ -1,8 +1,10 @@
 ---
-summary: "Hubs that link to every Clawdbot doc"
+summary: "Hubs that link to every OpenClaw doc"
 read_when:
   - You want a complete map of the documentation
+title: "Docs Hubs"
 ---
+
 # Docs hubs
 
 Use these hubs to discover every page, including deep dives and reference docs that don’t appear in the left nav.
@@ -18,7 +20,7 @@ Use these hubs to discover every page, including deep dives and reference docs t
 - [Help](/help)
 - [Configuration](/gateway/configuration)
 - [Configuration examples](/gateway/configuration-examples)
-- [Clawdbot assistant (Clawd)](/start/clawd)
+- [OpenClaw assistant](/start/openclaw)
 - [Showcase](/start/showcase)
 - [Lore](/start/lore)
 
@@ -102,6 +104,7 @@ Use these hubs to discover every page, including deep dives and reference docs t
 - [Exec tool](/tools/exec)
 - [Elevated mode](/tools/elevated)
 - [Cron jobs](/automation/cron-jobs)
+- [Cron vs Heartbeat](/automation/cron-vs-heartbeat)
 - [Thinking + verbose](/tools/thinking)
 - [Models](/concepts/models)
 - [Sub-agents](/tools/subagents)
@@ -155,7 +158,7 @@ Use these hubs to discover every page, including deep dives and reference docs t
 ## Workspace + templates
 
 - [Skills](/tools/skills)
-- [ClawdHub](/tools/clawdhub)
+- [ClawHub](/tools/clawhub)
 - [Skills config](/tools/skills-config)
 - [Default AGENTS](/reference/AGENTS.default)
 - [Templates: AGENTS](/reference/templates/AGENTS)

@@ -1,4 +1,4 @@
-import { MarkdownConfigSchema } from "clawdbot/plugin-sdk";
+import { MarkdownConfigSchema, ToolPolicySchema } from "openclaw/plugin-sdk";
 import { z } from "zod";
 
 const allowFromEntry = z.union([z.string(), z.number()]);
@@ -26,6 +26,7 @@ const matrixRoomSchema = z
     enabled: z.boolean().optional(),
     allow: z.boolean().optional(),
     requireMention: z.boolean().optional(),
+    tools: ToolPolicySchema,
     autoReply: z.boolean().optional(),
     users: z.array(allowFromEntry).optional(),
     skills: z.array(z.string()).optional(),
@@ -49,6 +50,7 @@ export const MatrixConfigSchema = z.object({
   replyToMode: z.enum(["off", "first", "all"]).optional(),
   threadReplies: z.enum(["off", "inbound", "always"]).optional(),
   textChunkLimit: z.number().optional(),
+  chunkMode: z.enum(["length", "newline"]).optional(),
   mediaMaxMb: z.number().optional(),
   autoJoin: z.enum(["always", "allowlist", "off"]).optional(),
   autoJoinAllowlist: z.array(allowFromEntry).optional(),

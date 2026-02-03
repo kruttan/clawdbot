@@ -1,4 +1,6 @@
 import { Type } from "@sinclair/typebox";
+import type { OpenClawConfig } from "../../config/config.js";
+import type { AnyAgentTool } from "./common.js";
 import { resolveAgentDir } from "../../agents/agent-scope.js";
 import {
   ensureAuthProfileStore,
@@ -18,7 +20,6 @@ import {
 import { normalizeGroupActivation } from "../../auto-reply/group-activation.js";
 import { getFollowupQueueDepth, resolveQueueSettings } from "../../auto-reply/reply/queue.js";
 import { buildStatusMessage } from "../../auto-reply/status.js";
-import type { ClawdbotConfig } from "../../config/config.js";
 import { loadConfig } from "../../config/config.js";
 import {
   loadSessionStore,
@@ -26,6 +27,7 @@ import {
   type SessionEntry,
   updateSessionStore,
 } from "../../config/sessions.js";
+import { loadCombinedSessionStoreForGateway } from "../../gateway/session-utils.js";
 import {
   formatUsageWindowSummary,
   loadProviderUsageSummary,
@@ -37,9 +39,14 @@ import {
   resolveAgentIdFromSessionKey,
 } from "../../routing/session-key.js";
 import { applyModelOverrideToSessionEntry } from "../../sessions/model-overrides.js";
-import type { AnyAgentTool } from "./common.js";
+import { formatUserTime, resolveUserTimeFormat, resolveUserTimezone } from "../date-time.js";
 import { readStringParam } from "./common.js";
-import { resolveInternalSessionKey, resolveMainSessionAlias } from "./sessions-helpers.js";
+import {
+  shouldResolveSessionIdInput,
+  resolveInternalSessionKey,
+  resolveMainSessionAlias,
+  createAgentToAgentPolicy,
+} from "./sessions-helpers.js";
 
 const SessionStatusToolSchema = Type.Object({
   sessionKey: Type.Optional(Type.String()),
@@ -48,7 +55,9 @@ const SessionStatusToolSchema = Type.Object({
 
 function formatApiKeySnippet(apiKey: string): string {
   const compact = apiKey.replace(/\s+/g, "");
-  if (!compact) return "unknown";
+  if (!compact) {
+    return "unknown";
+  }
   const edge = compact.length >= 12 ? 6 : 4;
   const head = compact.slice(0, edge);
   const tail = compact.slice(-edge);
@@ -57,12 +66,14 @@ function formatApiKeySnippet(apiKey: string): string {
 
 function resolveModelAuthLabel(params: {
   provider?: string;
-  cfg: ClawdbotConfig;
+  cfg: OpenClawConfig;
   sessionEntry?: SessionEntry;
   agentDir?: string;
 }): string | undefined {
   const resolvedProvider = params.provider?.trim();
-  if (!resolvedProvider) return undefined;
+  if (!resolvedProvider) {
+    return undefined;
+  }
 
   const providerKey = normalizeProviderId(resolvedProvider);
   const store = ensureAuthProfileStore(params.agentDir, {
@@ -119,7 +130,9 @@ function resolveSessionEntry(params: {
   mainKey: string;
 }): { key: string; entry: SessionEntry } | null {
   const keyRaw = params.keyRaw.trim();
-  if (!keyRaw) return null;
+  if (!keyRaw) {
+    return null;
+  }
   const internal = resolveInternalSessionKey({
     key: keyRaw,
     alias: params.alias,
@@ -142,14 +155,38 @@ function resolveSessionEntry(params: {
 
   for (const key of candidates) {
     const entry = params.store[key];
-    if (entry) return { key, entry };
+    if (entry) {
+      return { key, entry };
+    }
   }
 
   return null;
 }
 
+function resolveSessionKeyFromSessionId(params: {
+  cfg: OpenClawConfig;
+  sessionId: string;
+  agentId?: string;
+}): string | null {
+  const trimmed = params.sessionId.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const { store } = loadCombinedSessionStoreForGateway(params.cfg);
+  const match = Object.entries(store).find(([key, entry]) => {
+    if (entry?.sessionId !== trimmed) {
+      return false;
+    }
+    if (!params.agentId) {
+      return true;
+    }
+    return resolveAgentIdFromSessionKey(key) === params.agentId;
+  });
+  return match?.[0] ?? null;
+}
+
 async function resolveModelOverride(params: {
-  cfg: ClawdbotConfig;
+  cfg: OpenClawConfig;
   raw: string;
   sessionEntry?: SessionEntry;
   agentId: string;
@@ -163,8 +200,12 @@ async function resolveModelOverride(params: {
     }
 > {
   const raw = params.raw.trim();
-  if (!raw) return { kind: "reset" };
-  if (raw.toLowerCase() === "default") return { kind: "reset" };
+  if (!raw) {
+    return { kind: "reset" };
+  }
+  if (raw.toLowerCase() === "default") {
+    return { kind: "reset" };
+  }
 
   const configDefault = resolveDefaultModelForAgent({
     cfg: params.cfg,
@@ -209,36 +250,88 @@ async function resolveModelOverride(params: {
 
 export function createSessionStatusTool(opts?: {
   agentSessionKey?: string;
-  config?: ClawdbotConfig;
+  config?: OpenClawConfig;
 }): AnyAgentTool {
   return {
     label: "Session Status",
     name: "session_status",
     description:
-      "Show a /status-equivalent session status card (usage + cost when available). Use for model-use questions (📊 session_status). Optional: set per-session model override (model=default resets overrides).",
+      "Show a /status-equivalent session status card (usage + time + cost when available). Use for model-use questions (📊 session_status). Optional: set per-session model override (model=default resets overrides).",
     parameters: SessionStatusToolSchema,
     execute: async (_toolCallId, args) => {
       const params = args as Record<string, unknown>;
       const cfg = opts?.config ?? loadConfig();
       const { mainKey, alias } = resolveMainSessionAlias(cfg);
+      const a2aPolicy = createAgentToAgentPolicy(cfg);
 
-      const requestedKeyRaw = readStringParam(params, "sessionKey") ?? opts?.agentSessionKey;
+      const requestedKeyParam = readStringParam(params, "sessionKey");
+      let requestedKeyRaw = requestedKeyParam ?? opts?.agentSessionKey;
       if (!requestedKeyRaw?.trim()) {
         throw new Error("sessionKey required");
       }
 
-      const agentId = resolveAgentIdFromSessionKey(opts?.agentSessionKey ?? requestedKeyRaw);
-      const storePath = resolveStorePath(cfg.session?.store, { agentId });
-      const store = loadSessionStore(storePath);
+      const requesterAgentId = resolveAgentIdFromSessionKey(
+        opts?.agentSessionKey ?? requestedKeyRaw,
+      );
+      const ensureAgentAccess = (targetAgentId: string) => {
+        if (targetAgentId === requesterAgentId) {
+          return;
+        }
+        // Gate cross-agent access behind tools.agentToAgent settings.
+        if (!a2aPolicy.enabled) {
+          throw new Error(
+            "Agent-to-agent status is disabled. Set tools.agentToAgent.enabled=true to allow cross-agent access.",
+          );
+        }
+        if (!a2aPolicy.isAllowed(requesterAgentId, targetAgentId)) {
+          throw new Error("Agent-to-agent session status denied by tools.agentToAgent.allow.");
+        }
+      };
 
-      const resolved = resolveSessionEntry({
+      if (requestedKeyRaw.startsWith("agent:")) {
+        ensureAgentAccess(resolveAgentIdFromSessionKey(requestedKeyRaw));
+      }
+
+      const isExplicitAgentKey = requestedKeyRaw.startsWith("agent:");
+      let agentId = isExplicitAgentKey
+        ? resolveAgentIdFromSessionKey(requestedKeyRaw)
+        : requesterAgentId;
+      let storePath = resolveStorePath(cfg.session?.store, { agentId });
+      let store = loadSessionStore(storePath);
+
+      // Resolve against the requester-scoped store first to avoid leaking default agent data.
+      let resolved = resolveSessionEntry({
         store,
         keyRaw: requestedKeyRaw,
         alias,
         mainKey,
       });
+
+      if (!resolved && shouldResolveSessionIdInput(requestedKeyRaw)) {
+        const resolvedKey = resolveSessionKeyFromSessionId({
+          cfg,
+          sessionId: requestedKeyRaw,
+          agentId: a2aPolicy.enabled ? undefined : requesterAgentId,
+        });
+        if (resolvedKey) {
+          // If resolution points at another agent, enforce A2A policy before switching stores.
+          ensureAgentAccess(resolveAgentIdFromSessionKey(resolvedKey));
+          requestedKeyRaw = resolvedKey;
+          agentId = resolveAgentIdFromSessionKey(resolvedKey);
+          storePath = resolveStorePath(cfg.session?.store, { agentId });
+          store = loadSessionStore(storePath);
+          resolved = resolveSessionEntry({
+            store,
+            keyRaw: requestedKeyRaw,
+            alias,
+            mainKey,
+          });
+        }
+      }
+
       if (!resolved) {
-        throw new Error(`Unknown sessionKey: ${requestedKeyRaw}`);
+        const kind = shouldResolveSessionIdInput(requestedKeyRaw) ? "sessionId" : "sessionKey";
+        throw new Error(`Unknown ${kind}: ${requestedKeyRaw}`);
       }
 
       const configured = resolveDefaultModelForAgent({ cfg, agentId });
@@ -324,6 +417,13 @@ export function createSessionStatusTool(opts?: {
         resolved.entry.queueDebounceMs ?? resolved.entry.queueCap ?? resolved.entry.queueDrop,
       );
 
+      const userTimezone = resolveUserTimezone(cfg.agents?.defaults?.userTimezone);
+      const userTimeFormat = resolveUserTimeFormat(cfg.agents?.defaults?.timeFormat);
+      const userTime = formatUserTime(new Date(), userTimezone, userTimeFormat);
+      const timeLine = userTime
+        ? `🕒 Time: ${userTime} (${userTimezone})`
+        : `🕒 Time zone: ${userTimezone}`;
+
       const agentDefaults = cfg.agents?.defaults ?? {};
       const defaultLabel = `${configured.provider}/${configured.model}`;
       const agentModel =
@@ -346,6 +446,7 @@ export function createSessionStatusTool(opts?: {
           agentDir,
         }),
         usageLine,
+        timeLine,
         queue: {
           mode: queueSettings.mode,
           depth: queueDepth,

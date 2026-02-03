@@ -3,9 +3,10 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, test, vi } from "vitest";
 import { emitAgentEvent } from "../infra/agent-events.js";
+import { __setMaxChatHistoryMessagesBytesForTest } from "./server-constants.js";
 import {
-  agentCommand,
   connectOk,
+  getReplyFromConfig,
   installGatewayTestHooks,
   onceMessage,
   rpcReq,
@@ -14,12 +15,13 @@ import {
   testState,
   writeSessionStore,
 } from "./test-helpers.js";
-import { __setMaxChatHistoryMessagesBytesForTest } from "./server-constants.js";
 installGatewayTestHooks({ scope: "suite" });
 async function waitFor(condition: () => boolean, timeoutMs = 1500) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (condition()) return;
+    if (condition()) {
+      return;
+    }
     await new Promise((r) => setTimeout(r, 5));
   }
   throw new Error("timeout waiting for condition");
@@ -47,7 +49,7 @@ describe("gateway server chat", () => {
     async () => {
       const tempDirs: string[] = [];
       const { server, ws } = await startServerWithClient();
-      const spy = vi.mocked(agentCommand);
+      const spy = vi.mocked(getReplyFromConfig);
       const resetSpy = () => {
         spy.mockReset();
         spy.mockResolvedValue(undefined);
@@ -56,7 +58,7 @@ describe("gateway server chat", () => {
         const historyMaxBytes = 192 * 1024;
         __setMaxChatHistoryMessagesBytesForTest(historyMaxBytes);
         await connectOk(ws);
-        const sessionDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-gw-"));
+        const sessionDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-gw-"));
         tempDirs.push(sessionDir);
         testState.sessionStorePath = path.join(sessionDir, "sessions.json");
         const writeStore = async (
@@ -111,9 +113,10 @@ describe("gateway server chat", () => {
           idempotencyKey: "idem-route",
         });
         expect(routeRes.ok).toBe(true);
-        const stored = JSON.parse(
-          await fs.readFile(testState.sessionStorePath as string, "utf-8"),
-        ) as Record<string, { lastChannel?: string; lastTo?: string } | undefined>;
+        const stored = JSON.parse(await fs.readFile(testState.sessionStorePath, "utf-8")) as Record<
+          string,
+          { lastChannel?: string; lastTo?: string } | undefined
+        >;
         expect(stored["agent:main:main"]?.lastChannel).toBe("whatsapp");
         expect(stored["agent:main:main"]?.lastTo).toBe("+1555");
 
@@ -122,11 +125,16 @@ describe("gateway server chat", () => {
         let abortInFlight: Promise<unknown> | undefined;
         try {
           const callsBefore = spy.mock.calls.length;
-          spy.mockImplementationOnce(async (opts) => {
-            const signal = (opts as { abortSignal?: AbortSignal }).abortSignal;
+          spy.mockImplementationOnce(async (_ctx, opts) => {
+            opts?.onAgentRunStart?.(opts.runId ?? "idem-abort-1");
+            const signal = opts?.abortSignal;
             await new Promise<void>((resolve) => {
-              if (!signal) return resolve();
-              if (signal.aborted) return resolve();
+              if (!signal) {
+                return resolve();
+              }
+              if (signal.aborted) {
+                return resolve();
+              }
               signal.addEventListener("abort", () => resolve(), { once: true });
             });
           });
@@ -153,9 +161,12 @@ describe("gateway server chat", () => {
           await new Promise<void>((resolve, reject) => {
             const deadline = Date.now() + 1000;
             const tick = () => {
-              if (spy.mock.calls.length > callsBefore) return resolve();
-              if (Date.now() > deadline)
-                return reject(new Error("timeout waiting for agentCommand"));
+              if (spy.mock.calls.length > callsBefore) {
+                return resolve();
+              }
+              if (Date.now() > deadline) {
+                return reject(new Error("timeout waiting for getReplyFromConfig"));
+              }
               setTimeout(tick, 5);
             };
             tick();
@@ -177,11 +188,16 @@ describe("gateway server chat", () => {
         sessionStoreSaveDelayMs.value = 120;
         resetSpy();
         try {
-          spy.mockImplementationOnce(async (opts) => {
-            const signal = (opts as { abortSignal?: AbortSignal }).abortSignal;
+          spy.mockImplementationOnce(async (_ctx, opts) => {
+            opts?.onAgentRunStart?.(opts.runId ?? "idem-abort-save-1");
+            const signal = opts?.abortSignal;
             await new Promise<void>((resolve) => {
-              if (!signal) return resolve();
-              if (signal.aborted) return resolve();
+              if (!signal) {
+                return resolve();
+              }
+              if (signal.aborted) {
+                return resolve();
+              }
               signal.addEventListener("abort", () => resolve(), { once: true });
             });
           });
@@ -215,11 +231,16 @@ describe("gateway server chat", () => {
         await writeStore({ main: { sessionId: "sess-main", updatedAt: Date.now() } });
         resetSpy();
         const callsBeforeStop = spy.mock.calls.length;
-        spy.mockImplementationOnce(async (opts) => {
-          const signal = (opts as { abortSignal?: AbortSignal }).abortSignal;
+        spy.mockImplementationOnce(async (_ctx, opts) => {
+          opts?.onAgentRunStart?.(opts.runId ?? "idem-stop-1");
+          const signal = opts?.abortSignal;
           await new Promise<void>((resolve) => {
-            if (!signal) return resolve();
-            if (signal.aborted) return resolve();
+            if (!signal) {
+              return resolve();
+            }
+            if (signal.aborted) {
+              return resolve();
+            }
             signal.addEventListener("abort", () => resolve(), { once: true });
           });
         });
@@ -261,7 +282,8 @@ describe("gateway server chat", () => {
         const runDone = new Promise<void>((resolve) => {
           resolveRun = resolve;
         });
-        spy.mockImplementationOnce(async () => {
+        spy.mockImplementationOnce(async (_ctx, opts) => {
+          opts?.onAgentRunStart?.(opts.runId ?? "idem-status-1");
           await runDone;
         });
         const started = await rpcReq<{ runId?: string; status?: string }>(ws, "chat.send", {
@@ -294,11 +316,16 @@ describe("gateway server chat", () => {
         }
         expect(completed).toBe(true);
         resetSpy();
-        spy.mockImplementationOnce(async (opts) => {
-          const signal = (opts as { abortSignal?: AbortSignal }).abortSignal;
+        spy.mockImplementationOnce(async (_ctx, opts) => {
+          opts?.onAgentRunStart?.(opts.runId ?? "idem-abort-all-1");
+          const signal = opts?.abortSignal;
           await new Promise<void>((resolve) => {
-            if (!signal) return resolve();
-            if (signal.aborted) return resolve();
+            if (!signal) {
+              return resolve();
+            }
+            if (signal.aborted) {
+              return resolve();
+            }
             signal.addEventListener("abort", () => resolve(), { once: true });
           });
         });
@@ -359,12 +386,16 @@ describe("gateway server chat", () => {
         const agentStartedP = new Promise<void>((resolve) => {
           agentStartedResolve = resolve;
         });
-        spy.mockImplementationOnce(async (opts) => {
+        spy.mockImplementationOnce(async (_ctx, opts) => {
           agentStartedResolve?.();
-          const signal = (opts as { abortSignal?: AbortSignal }).abortSignal;
+          const signal = opts?.abortSignal;
           await new Promise<void>((resolve) => {
-            if (!signal) return resolve();
-            if (signal.aborted) return resolve();
+            if (!signal) {
+              return resolve();
+            }
+            if (signal.aborted) {
+              return resolve();
+            }
             signal.addEventListener("abort", () => resolve(), { once: true });
           });
         });

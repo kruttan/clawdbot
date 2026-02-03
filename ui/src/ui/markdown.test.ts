@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-
 import { toSanitizedMarkdownHtml } from "./markdown";
 
 describe("toSanitizedMarkdownHtml", () => {
@@ -30,4 +29,3 @@ describe("toSanitizedMarkdownHtml", () => {
     expect(html).toContain("console.log(1)");
   });
 });
-

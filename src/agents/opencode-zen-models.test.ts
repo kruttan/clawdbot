@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-
 import {
   getOpencodeZenStaticFallbackModels,
   OPENCODE_ZEN_MODEL_ALIASES,
@@ -54,7 +53,7 @@ describe("getOpencodeZenStaticFallbackModels", () => {
   it("returns an array of models", () => {
     const models = getOpencodeZenStaticFallbackModels();
     expect(Array.isArray(models)).toBe(true);
-    expect(models.length).toBe(10);
+    expect(models.length).toBe(9);
   });
 
   it("includes Claude, GPT, Gemini, and GLM models", () => {

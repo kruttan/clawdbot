@@ -16,22 +16,25 @@ export type AuthChoice =
   | "moonshot-api-key"
   | "kimi-code-api-key"
   | "synthetic-api-key"
+  | "venice-api-key"
   | "codex-cli"
   | "apiKey"
   | "gemini-api-key"
   | "google-antigravity"
   | "google-gemini-cli"
   | "zai-api-key"
+  | "xiaomi-api-key"
   | "minimax-cloud"
   | "minimax"
   | "minimax-api"
   | "minimax-api-lightning"
+  | "minimax-portal"
   | "opencode-zen"
   | "github-copilot"
   | "copilot-proxy"
   | "qwen-portal"
   | "skip";
-export type GatewayAuthChoice = "off" | "token" | "password";
+export type GatewayAuthChoice = "token" | "password";
 export type ResetScope = "config" | "config+creds+sessions" | "full";
 export type GatewayBind = "loopback" | "lan" | "auto" | "custom" | "tailnet";
 export type TailscaleMode = "off" | "serve" | "funnel";
@@ -66,8 +69,10 @@ export type OnboardOptions = {
   kimiCodeApiKey?: string;
   geminiApiKey?: string;
   zaiApiKey?: string;
+  xiaomiApiKey?: string;
   minimaxApiKey?: string;
   syntheticApiKey?: string;
+  veniceApiKey?: string;
   opencodeZenApiKey?: string;
   gatewayPort?: number;
   gatewayBind?: GatewayBind;

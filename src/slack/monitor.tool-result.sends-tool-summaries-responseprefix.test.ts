@@ -1,5 +1,4 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-
 import { HISTORY_CONTEXT_MARKER } from "../auto-reply/reply/history.js";
 import { resetInboundDedupe } from "../auto-reply/reply/inbound-dedupe.js";
 import { CURRENT_MESSAGE_MARKER } from "../auto-reply/reply/mentions.js";
@@ -12,7 +11,8 @@ import {
   resetSlackTestState,
   waitForSlackEvent,
 } from "./monitor.test-helpers.js";
-import { monitorSlackProvider } from "./monitor.js";
+
+const { monitorSlackProvider } = await import("./monitor.js");
 
 const slackTestState = getSlackTestState();
 const { sendMock, replyMock } = slackTestState;
@@ -23,11 +23,8 @@ beforeEach(() => {
 });
 
 describe("monitorSlackProvider tool results", () => {
-  it("sends tool summaries with responsePrefix", async () => {
-    replyMock.mockImplementation(async (_ctx, opts) => {
-      await opts?.onToolResult?.({ text: "tool update" });
-      return { text: "final reply" };
-    });
+  it("skips tool summaries with responsePrefix", async () => {
+    replyMock.mockResolvedValue({ text: "final reply" });
 
     const controller = new AbortController();
     const run = monitorSlackProvider({
@@ -38,7 +35,9 @@ describe("monitorSlackProvider tool results", () => {
 
     await waitForSlackEvent("message");
     const handler = getSlackHandlers()?.get("message");
-    if (!handler) throw new Error("Slack message handler not registered");
+    if (!handler) {
+      throw new Error("Slack message handler not registered");
+    }
 
     await handler({
       event: {
@@ -55,14 +54,15 @@ describe("monitorSlackProvider tool results", () => {
     controller.abort();
     await run;
 
-    expect(sendMock).toHaveBeenCalledTimes(2);
-    expect(sendMock.mock.calls[0][1]).toBe("PFX tool update");
-    expect(sendMock.mock.calls[1][1]).toBe("PFX final reply");
+    expect(sendMock).toHaveBeenCalledTimes(1);
+    expect(sendMock.mock.calls[0][1]).toBe("PFX final reply");
   });
 
   it("drops events with mismatched api_app_id", async () => {
     const client = getSlackClient();
-    if (!client) throw new Error("Slack client not registered");
+    if (!client) {
+      throw new Error("Slack client not registered");
+    }
     (client.auth as { test: ReturnType<typeof vi.fn> }).test.mockResolvedValue({
       user_id: "bot-user",
       team_id: "T1",
@@ -78,7 +78,9 @@ describe("monitorSlackProvider tool results", () => {
 
     await waitForSlackEvent("message");
     const handler = getSlackHandlers()?.get("message");
-    if (!handler) throw new Error("Slack message handler not registered");
+    if (!handler) {
+      throw new Error("Slack message handler not registered");
+    }
 
     await handler({
       body: { api_app_id: "A2", team_id: "T1" },
@@ -130,10 +132,7 @@ describe("monitorSlackProvider tool results", () => {
       },
     };
 
-    replyMock.mockImplementation(async (_ctx, opts) => {
-      await opts?.onToolResult?.({ text: "tool update" });
-      return { text: "final reply" };
-    });
+    replyMock.mockResolvedValue({ text: "final reply" });
 
     const controller = new AbortController();
     const run = monitorSlackProvider({
@@ -144,7 +143,9 @@ describe("monitorSlackProvider tool results", () => {
 
     await waitForSlackEvent("message");
     const handler = getSlackHandlers()?.get("message");
-    if (!handler) throw new Error("Slack message handler not registered");
+    if (!handler) {
+      throw new Error("Slack message handler not registered");
+    }
 
     await handler({
       event: {
@@ -161,9 +162,8 @@ describe("monitorSlackProvider tool results", () => {
     controller.abort();
     await run;
 
-    expect(sendMock).toHaveBeenCalledTimes(2);
-    expect(sendMock.mock.calls[0][1]).toBe("tool update");
-    expect(sendMock.mock.calls[1][1]).toBe("final reply");
+    expect(sendMock).toHaveBeenCalledTimes(1);
+    expect(sendMock.mock.calls[0][1]).toBe("final reply");
   });
 
   it("preserves RawBody without injecting processed room history", async () => {
@@ -193,7 +193,9 @@ describe("monitorSlackProvider tool results", () => {
 
     await waitForSlackEvent("message");
     const handler = getSlackHandlers()?.get("message");
-    if (!handler) throw new Error("Slack message handler not registered");
+    if (!handler) {
+      throw new Error("Slack message handler not registered");
+    }
 
     await handler({
       event: {
@@ -256,7 +258,9 @@ describe("monitorSlackProvider tool results", () => {
 
     await waitForSlackEvent("message");
     const handler = getSlackHandlers()?.get("message");
-    if (!handler) throw new Error("Slack message handler not registered");
+    if (!handler) {
+      throw new Error("Slack message handler not registered");
+    }
 
     await handler({
       event: {
@@ -319,7 +323,9 @@ describe("monitorSlackProvider tool results", () => {
 
     await waitForSlackEvent("message");
     const handler = getSlackHandlers()?.get("message");
-    if (!handler) throw new Error("Slack message handler not registered");
+    if (!handler) {
+      throw new Error("Slack message handler not registered");
+    }
 
     await handler({
       event: {
@@ -359,7 +365,7 @@ describe("monitorSlackProvider tool results", () => {
     slackTestState.config = {
       messages: {
         responsePrefix: "PFX",
-        groupChat: { mentionPatterns: ["\\bclawd\\b"] },
+        groupChat: { mentionPatterns: ["\\bopenclaw\\b"] },
       },
       channels: {
         slack: {
@@ -379,13 +385,62 @@ describe("monitorSlackProvider tool results", () => {
 
     await waitForSlackEvent("message");
     const handler = getSlackHandlers()?.get("message");
-    if (!handler) throw new Error("Slack message handler not registered");
+    if (!handler) {
+      throw new Error("Slack message handler not registered");
+    }
 
     await handler({
       event: {
         type: "message",
         user: "U1",
-        text: "clawd: hello",
+        text: "openclaw: hello",
+        ts: "123",
+        channel: "C1",
+        channel_type: "channel",
+      },
+    });
+
+    await flush();
+    controller.abort();
+    await run;
+
+    expect(replyMock).toHaveBeenCalledTimes(1);
+    expect(replyMock.mock.calls[0][0].WasMentioned).toBe(true);
+  });
+
+  it("accepts channel messages when mentionPatterns match even if another user is mentioned", async () => {
+    slackTestState.config = {
+      messages: {
+        responsePrefix: "PFX",
+        groupChat: { mentionPatterns: ["\\bopenclaw\\b"] },
+      },
+      channels: {
+        slack: {
+          dm: { enabled: true, policy: "open", allowFrom: ["*"] },
+          channels: { C1: { allow: true, requireMention: true } },
+        },
+      },
+    };
+    replyMock.mockResolvedValue({ text: "hi" });
+
+    const controller = new AbortController();
+    const run = monitorSlackProvider({
+      botToken: "bot-token",
+      appToken: "app-token",
+      abortSignal: controller.signal,
+    });
+
+    await waitForSlackEvent("message");
+    const handler = getSlackHandlers()?.get("message");
+    if (!handler) {
+      throw new Error("Slack message handler not registered");
+    }
+
+    await handler({
+      event: {
+        type: "message",
+        user: "U1",
+        text: "openclaw: hello <@U2>",
         ts: "123",
         channel: "C1",
         channel_type: "channel",
@@ -420,7 +475,9 @@ describe("monitorSlackProvider tool results", () => {
 
     await waitForSlackEvent("message");
     const handler = getSlackHandlers()?.get("message");
-    if (!handler) throw new Error("Slack message handler not registered");
+    if (!handler) {
+      throw new Error("Slack message handler not registered");
+    }
 
     await handler({
       event: {
@@ -464,7 +521,9 @@ describe("monitorSlackProvider tool results", () => {
 
     await waitForSlackEvent("message");
     const handler = getSlackHandlers()?.get("message");
-    if (!handler) throw new Error("Slack message handler not registered");
+    if (!handler) {
+      throw new Error("Slack message handler not registered");
+    }
 
     await handler({
       event: {
@@ -498,7 +557,9 @@ describe("monitorSlackProvider tool results", () => {
 
     await waitForSlackEvent("message");
     const handler = getSlackHandlers()?.get("message");
-    if (!handler) throw new Error("Slack message handler not registered");
+    if (!handler) {
+      throw new Error("Slack message handler not registered");
+    }
 
     await handler({
       event: {
@@ -544,7 +605,9 @@ describe("monitorSlackProvider tool results", () => {
 
     await waitForSlackEvent("message");
     const handler = getSlackHandlers()?.get("message");
-    if (!handler) throw new Error("Slack message handler not registered");
+    if (!handler) {
+      throw new Error("Slack message handler not registered");
+    }
 
     await handler({
       event: {

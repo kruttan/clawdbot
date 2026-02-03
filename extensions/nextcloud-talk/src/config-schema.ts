@@ -4,13 +4,15 @@ import {
   DmPolicySchema,
   GroupPolicySchema,
   MarkdownConfigSchema,
+  ToolPolicySchema,
   requireOpenAllowFrom,
-} from "clawdbot/plugin-sdk";
+} from "openclaw/plugin-sdk";
 import { z } from "zod";
 
 export const NextcloudTalkRoomSchema = z
   .object({
     requireMention: z.boolean().optional(),
+    tools: ToolPolicySchema,
     skills: z.array(z.string()).optional(),
     enabled: z.boolean().optional(),
     allowFrom: z.array(z.string()).optional(),
@@ -42,6 +44,7 @@ export const NextcloudTalkAccountSchemaBase = z
     dmHistoryLimit: z.number().int().min(0).optional(),
     dms: z.record(z.string(), DmConfigSchema.optional()).optional(),
     textChunkLimit: z.number().int().positive().optional(),
+    chunkMode: z.enum(["length", "newline"]).optional(),
     blockStreaming: z.boolean().optional(),
     blockStreamingCoalesce: BlockStreamingCoalesceSchema.optional(),
     mediaMaxMb: z.number().positive().optional(),

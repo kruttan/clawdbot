@@ -1,13 +1,12 @@
-import {
-  resolveEffectiveMessagesConfig,
-  resolveIdentityName,
-  resolveIdentityNamePrefix,
-} from "../../../agents/identity.js";
-import {
-  extractShortModelName,
-  type ResponsePrefixContext,
-} from "../../../auto-reply/reply/response-prefix-template.js";
-import { resolveTextChunkLimit } from "../../../auto-reply/chunk.js";
+import type { getReplyFromConfig } from "../../../auto-reply/reply.js";
+import type { ReplyPayload } from "../../../auto-reply/types.js";
+import type { loadConfig } from "../../../config/config.js";
+import type { getChildLogger } from "../../../logging.js";
+import type { resolveAgentRoute } from "../../../routing/resolve-route.js";
+import type { WebInboundMsg } from "../types.js";
+import { resolveIdentityNamePrefix } from "../../../agents/identity.js";
+import { resolveChunkMode, resolveTextChunkLimit } from "../../../auto-reply/chunk.js";
+import { shouldComputeCommandAuthorized } from "../../../auto-reply/command-detection.js";
 import {
   formatInboundEnvelope,
   resolveEnvelopeFormatOptions,
@@ -16,29 +15,23 @@ import {
   buildHistoryContextFromEntries,
   type HistoryEntry,
 } from "../../../auto-reply/reply/history.js";
-import { dispatchReplyWithBufferedBlockDispatcher } from "../../../auto-reply/reply/provider-dispatcher.js";
-import type { getReplyFromConfig } from "../../../auto-reply/reply.js";
-import type { ReplyPayload } from "../../../auto-reply/types.js";
-import { shouldComputeCommandAuthorized } from "../../../auto-reply/command-detection.js";
 import { finalizeInboundContext } from "../../../auto-reply/reply/inbound-context.js";
+import { dispatchReplyWithBufferedBlockDispatcher } from "../../../auto-reply/reply/provider-dispatcher.js";
 import { toLocationContext } from "../../../channels/location.js";
-import type { loadConfig } from "../../../config/config.js";
+import { createReplyPrefixContext } from "../../../channels/reply-prefix.js";
+import { resolveMarkdownTableMode } from "../../../config/markdown-tables.js";
 import {
   readSessionUpdatedAt,
   recordSessionMetaFromInbound,
   resolveStorePath,
 } from "../../../config/sessions.js";
-import { resolveMarkdownTableMode } from "../../../config/markdown-tables.js";
 import { logVerbose, shouldLogVerbose } from "../../../globals.js";
-import type { getChildLogger } from "../../../logging.js";
 import { readChannelAllowFromStore } from "../../../pairing/pairing-store.js";
-import type { resolveAgentRoute } from "../../../routing/resolve-route.js";
 import { jidToE164, normalizeE164 } from "../../../utils.js";
 import { newConnectionId } from "../../reconnect.js";
 import { formatError } from "../../session.js";
 import { deliverWebReply } from "../deliver-reply.js";
 import { whatsappInboundLog, whatsappOutboundLog } from "../loggers.js";
-import type { WebInboundMsg } from "../types.js";
 import { elide } from "../util.js";
 import { maybeSendAckReaction } from "./ack-reaction.js";
 import { formatGroupMembers } from "./group-members.js";
@@ -67,13 +60,17 @@ async function resolveWhatsAppCommandAuthorized(params: {
   msg: WebInboundMsg;
 }): Promise<boolean> {
   const useAccessGroups = params.cfg.commands?.useAccessGroups !== false;
-  if (!useAccessGroups) return true;
+  if (!useAccessGroups) {
+    return true;
+  }
 
   const isGroup = params.msg.chatType === "group";
   const senderE164 = normalizeE164(
     isGroup ? (params.msg.senderE164 ?? "") : (params.msg.senderE164 ?? params.msg.from ?? ""),
   );
-  if (!senderE164) return false;
+  if (!senderE164) {
+    return false;
+  }
 
   const configuredAllowFrom = params.cfg.channels?.whatsapp?.allowFrom ?? [];
   const configuredGroupAllowFrom =
@@ -81,8 +78,12 @@ async function resolveWhatsAppCommandAuthorized(params: {
     (configuredAllowFrom.length > 0 ? configuredAllowFrom : undefined);
 
   if (isGroup) {
-    if (!configuredGroupAllowFrom || configuredGroupAllowFrom.length === 0) return false;
-    if (configuredGroupAllowFrom.some((v) => String(v).trim() === "*")) return true;
+    if (!configuredGroupAllowFrom || configuredGroupAllowFrom.length === 0) {
+      return false;
+    }
+    if (configuredGroupAllowFrom.some((v) => String(v).trim() === "*")) {
+      return true;
+    }
     return normalizeAllowFromE164(configuredGroupAllowFrom).includes(senderE164);
   }
 
@@ -96,7 +97,9 @@ async function resolveWhatsAppCommandAuthorized(params: {
       : params.msg.selfE164
         ? [params.msg.selfE164]
         : [];
-  if (allowFrom.some((v) => String(v).trim() === "*")) return true;
+  if (allowFrom.some((v) => String(v).trim() === "*")) {
+    return true;
+  }
   return normalizeAllowFromE164(allowFrom).includes(senderE164);
 }
 
@@ -228,14 +231,19 @@ export async function processMessage(params: {
   const dmRouteTarget =
     params.msg.chatType !== "group"
       ? (() => {
-          if (params.msg.senderE164) return normalizeE164(params.msg.senderE164);
+          if (params.msg.senderE164) {
+            return normalizeE164(params.msg.senderE164);
+          }
           // In direct chats, `msg.from` is already the canonical conversation id.
-          if (params.msg.from.includes("@")) return jidToE164(params.msg.from);
+          if (params.msg.from.includes("@")) {
+            return jidToE164(params.msg.from);
+          }
           return normalizeE164(params.msg.from);
         })()
       : undefined;
 
   const textLimit = params.maxMediaTextChunkLimit ?? resolveTextChunkLimit(params.cfg, "whatsapp");
+  const chunkMode = resolveChunkMode(params.cfg, "whatsapp", params.route.accountId);
   const tableMode = resolveMarkdownTableMode({
     cfg: params.cfg,
     channel: "whatsapp",
@@ -247,21 +255,19 @@ export async function processMessage(params: {
     ? await resolveWhatsAppCommandAuthorized({ cfg: params.cfg, msg: params.msg })
     : undefined;
   const configuredResponsePrefix = params.cfg.messages?.responsePrefix;
-  const resolvedMessages = resolveEffectiveMessagesConfig(params.cfg, params.route.agentId);
+  const prefixContext = createReplyPrefixContext({
+    cfg: params.cfg,
+    agentId: params.route.agentId,
+  });
   const isSelfChat =
     params.msg.chatType !== "group" &&
     Boolean(params.msg.selfE164) &&
     normalizeE164(params.msg.from) === normalizeE164(params.msg.selfE164 ?? "");
   const responsePrefix =
-    resolvedMessages.responsePrefix ??
+    prefixContext.responsePrefix ??
     (configuredResponsePrefix === undefined && isSelfChat
-      ? (resolveIdentityNamePrefix(params.cfg, params.route.agentId) ?? "[clawdbot]")
+      ? (resolveIdentityNamePrefix(params.cfg, params.route.agentId) ?? "[openclaw]")
       : undefined);
-
-  // Create mutable context for response prefix template interpolation
-  let prefixContext: ResponsePrefixContext = {
-    identityName: resolveIdentityName(params.cfg, params.route.agentId),
-  };
 
   const ctxPayload = finalizeInboundContext({
     Body: combinedBody,
@@ -334,7 +340,7 @@ export async function processMessage(params: {
     replyResolver: params.replyResolver,
     dispatcherOptions: {
       responsePrefix,
-      responsePrefixContextProvider: () => prefixContext,
+      responsePrefixContextProvider: prefixContext.responsePrefixContextProvider,
       onHeartbeatStrip: () => {
         if (!didLogHeartbeatStrip) {
           didLogHeartbeatStrip = true;
@@ -347,6 +353,7 @@ export async function processMessage(params: {
           msg: params.msg,
           maxMediaBytes: params.maxMediaBytes,
           textLimit,
+          chunkMode,
           replyLogger: params.replyLogger,
           connectionId: params.connectionId,
           // Tool + block updates are noisy; skip their log lines.
@@ -393,13 +400,7 @@ export async function processMessage(params: {
         typeof params.cfg.channels?.whatsapp?.blockStreaming === "boolean"
           ? !params.cfg.channels.whatsapp.blockStreaming
           : undefined,
-      onModelSelected: (ctx) => {
-        // Mutate the object directly instead of reassigning to ensure the closure sees updates
-        prefixContext.provider = ctx.provider;
-        prefixContext.model = extractShortModelName(ctx.model);
-        prefixContext.modelFull = `${ctx.provider}/${ctx.model}`;
-        prefixContext.thinkingLevel = ctx.thinkLevel ?? "off";
-      },
+      onModelSelected: prefixContext.onModelSelected,
     },
   });
 

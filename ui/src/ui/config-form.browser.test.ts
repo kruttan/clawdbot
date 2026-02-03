@@ -1,6 +1,5 @@
 import { render } from "lit";
 import { describe, expect, it, vi } from "vitest";
-
 import { analyzeConfigSchema, renderConfigForm } from "./views/config-form";
 
 const rootSchema = {
@@ -29,12 +28,7 @@ const rootSchema = {
       type: "boolean",
     },
     bind: {
-      anyOf: [
-        { const: "auto" },
-        { const: "lan" },
-        { const: "tailnet" },
-        { const: "loopback" },
-      ],
+      anyOf: [{ const: "auto" }, { const: "lan" }, { const: "tailnet" }, { const: "loopback" }],
     },
   },
 };
@@ -57,39 +51,27 @@ describe("config form renderer", () => {
       container,
     );
 
-    const tokenInput = container.querySelector(
-      "input[type='password']",
-    ) as HTMLInputElement | null;
+    const tokenInput = container.querySelector("input[type='password']");
     expect(tokenInput).not.toBeNull();
-    if (!tokenInput) return;
+    if (!tokenInput) {
+      return;
+    }
     tokenInput.value = "abc123";
     tokenInput.dispatchEvent(new Event("input", { bubbles: true }));
-    expect(onPatch).toHaveBeenCalledWith(
-      ["gateway", "auth", "token"],
-      "abc123",
-    );
+    expect(onPatch).toHaveBeenCalledWith(["gateway", "auth", "token"], "abc123");
 
-    const select = container.querySelector("select") as HTMLSelectElement | null;
-    const selects = Array.from(container.querySelectorAll("select"));
-    const modeSelect = selects.find((el) =>
-      Array.from(el.options).some((opt) => opt.textContent?.trim() === "token"),
-    ) as HTMLSelectElement | undefined;
-    expect(modeSelect).not.toBeUndefined();
-    if (!modeSelect) return;
-    const tokenOption = Array.from(modeSelect.options).find(
-      (opt) => opt.textContent?.trim() === "token",
-    );
-    expect(tokenOption).not.toBeUndefined();
-    if (!tokenOption) return;
-    modeSelect.value = tokenOption.value;
-    modeSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    const tokenButton = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(".cfg-segmented__btn"),
+    ).find((btn) => btn.textContent?.trim() === "token");
+    expect(tokenButton).not.toBeUndefined();
+    tokenButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(onPatch).toHaveBeenCalledWith(["mode"], "token");
 
-    const checkbox = container.querySelector(
-      "input[type='checkbox']",
-    ) as HTMLInputElement | null;
+    const checkbox = container.querySelector("input[type='checkbox']");
     expect(checkbox).not.toBeNull();
-    if (!checkbox) return;
+    if (!checkbox) {
+      return;
+    }
     checkbox.checked = true;
     checkbox.dispatchEvent(new Event("change", { bubbles: true }));
     expect(onPatch).toHaveBeenCalledWith(["enabled"], true);
@@ -110,16 +92,12 @@ describe("config form renderer", () => {
       container,
     );
 
-    const addButton = Array.from(container.querySelectorAll("button")).find(
-      (btn) => btn.textContent?.trim() === "Add",
-    );
+    const addButton = container.querySelector(".cfg-array__add");
     expect(addButton).not.toBeUndefined();
     addButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(onPatch).toHaveBeenCalledWith(["allowFrom"], ["+1", ""]);
 
-    const removeButton = Array.from(container.querySelectorAll("button")).find(
-      (btn) => btn.textContent?.trim() === "Remove",
-    );
+    const removeButton = container.querySelector(".cfg-array__item-remove");
     expect(removeButton).not.toBeUndefined();
     removeButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(onPatch).toHaveBeenCalledWith(["allowFrom"], []);
@@ -140,19 +118,11 @@ describe("config form renderer", () => {
       container,
     );
 
-    const selects = Array.from(container.querySelectorAll("select"));
-    const bindSelect = selects.find((el) =>
-      Array.from(el.options).some((opt) => opt.textContent?.trim() === "tailnet"),
-    ) as HTMLSelectElement | undefined;
-    expect(bindSelect).not.toBeUndefined();
-    if (!bindSelect) return;
-    const tailnetOption = Array.from(bindSelect.options).find(
-      (opt) => opt.textContent?.trim() === "tailnet",
-    );
-    expect(tailnetOption).not.toBeUndefined();
-    if (!tailnetOption) return;
-    bindSelect.value = tailnetOption.value;
-    bindSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    const tailnetButton = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(".cfg-segmented__btn"),
+    ).find((btn) => btn.textContent?.trim() === "tailnet");
+    expect(tailnetButton).not.toBeUndefined();
+    tailnetButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(onPatch).toHaveBeenCalledWith(["bind"], "tailnet");
   });
 
@@ -182,9 +152,7 @@ describe("config form renderer", () => {
       container,
     );
 
-    const removeButton = Array.from(container.querySelectorAll("button")).find(
-      (btn) => btn.textContent?.trim() === "Remove",
-    );
+    const removeButton = container.querySelector(".cfg-map__item-remove");
     expect(removeButton).not.toBeUndefined();
     removeButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(onPatch).toHaveBeenCalledWith(["slack"], {});

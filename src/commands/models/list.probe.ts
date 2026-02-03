@@ -1,20 +1,20 @@
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
-
-import { resolveClawdbotAgentDir } from "../../agents/agent-paths.js";
+import type { OpenClawConfig } from "../../config/config.js";
+import { resolveOpenClawAgentDir } from "../../agents/agent-paths.js";
+import { resolveAgentWorkspaceDir, resolveDefaultAgentId } from "../../agents/agent-scope.js";
 import {
   ensureAuthProfileStore,
   listProfilesForProvider,
   resolveAuthProfileDisplayLabel,
+  resolveAuthProfileOrder,
 } from "../../agents/auth-profiles.js";
-import { runEmbeddedPiAgent } from "../../agents/pi-embedded.js";
 import { describeFailoverError } from "../../agents/failover-error.js";
-import { loadModelCatalog } from "../../agents/model-catalog.js";
 import { getCustomProviderApiKey, resolveEnvApiKey } from "../../agents/model-auth.js";
+import { loadModelCatalog } from "../../agents/model-catalog.js";
 import { normalizeProviderId, parseModelRef } from "../../agents/model-selection.js";
-import { resolveAgentWorkspaceDir, resolveDefaultAgentId } from "../../agents/agent-scope.js";
+import { runEmbeddedPiAgent } from "../../agents/pi-embedded.js";
 import { resolveDefaultAgentWorkspaceDir } from "../../agents/workspace.js";
-import type { ClawdbotConfig } from "../../config/config.js";
 import {
   resolveSessionTranscriptPath,
   resolveSessionTranscriptsDirForAgent,
@@ -79,12 +79,24 @@ export type AuthProbeOptions = {
 };
 
 const toStatus = (reason?: string | null): AuthProbeStatus => {
-  if (!reason) return "unknown";
-  if (reason === "auth") return "auth";
-  if (reason === "rate_limit") return "rate_limit";
-  if (reason === "billing") return "billing";
-  if (reason === "timeout") return "timeout";
-  if (reason === "format") return "format";
+  if (!reason) {
+    return "unknown";
+  }
+  if (reason === "auth") {
+    return "auth";
+  }
+  if (reason === "rate_limit") {
+    return "rate_limit";
+  }
+  if (reason === "billing") {
+    return "billing";
+  }
+  if (reason === "timeout") {
+    return "timeout";
+  }
+  if (reason === "format") {
+    return "format";
+  }
   return "unknown";
 };
 
@@ -92,9 +104,13 @@ function buildCandidateMap(modelCandidates: string[]): Map<string, string[]> {
   const map = new Map<string, string[]>();
   for (const raw of modelCandidates) {
     const parsed = parseModelRef(String(raw ?? ""), DEFAULT_PROVIDER);
-    if (!parsed) continue;
+    if (!parsed) {
+      continue;
+    }
     const list = map.get(parsed.provider) ?? [];
-    if (!list.includes(parsed.model)) list.push(parsed.model);
+    if (!list.includes(parsed.model)) {
+      list.push(parsed.model);
+    }
     map.set(parsed.provider, list);
   }
   return map;
@@ -111,12 +127,14 @@ function selectProbeModel(params: {
     return { provider, model: direct[0] };
   }
   const fromCatalog = catalog.find((entry) => entry.provider === provider);
-  if (fromCatalog) return { provider: fromCatalog.provider, model: fromCatalog.id };
+  if (fromCatalog) {
+    return { provider: fromCatalog.provider, model: fromCatalog.id };
+  }
   return null;
 }
 
 function buildProbeTargets(params: {
-  cfg: ClawdbotConfig;
+  cfg: OpenClawConfig;
   providers: string[];
   modelCandidates: string[];
   options: AuthProbeOptions;
@@ -134,7 +152,9 @@ function buildProbeTargets(params: {
 
     for (const provider of providers) {
       const providerKey = normalizeProviderId(provider);
-      if (providerFilterKey && providerKey !== providerFilterKey) continue;
+      if (providerFilterKey && providerKey !== providerFilterKey) {
+        continue;
+      }
 
       const model = selectProbeModel({
         provider: providerKey,
@@ -143,6 +163,29 @@ function buildProbeTargets(params: {
       });
 
       const profileIds = listProfilesForProvider(store, providerKey);
+      const explicitOrder = (() => {
+        const order = store.order;
+        if (order) {
+          for (const [key, value] of Object.entries(order)) {
+            if (normalizeProviderId(key) === providerKey) {
+              return value;
+            }
+          }
+        }
+        const cfgOrder = cfg?.auth?.order;
+        if (cfgOrder) {
+          for (const [key, value] of Object.entries(cfgOrder)) {
+            if (normalizeProviderId(key) === providerKey) {
+              return value;
+            }
+          }
+        }
+        return undefined;
+      })();
+      const allowedProfiles =
+        explicitOrder && explicitOrder.length > 0
+          ? new Set(resolveAuthProfileOrder({ cfg, store, provider: providerKey }))
+          : null;
       const filteredProfiles = profileFilter.size
         ? profileIds.filter((id) => profileFilter.has(id))
         : profileIds;
@@ -152,6 +195,32 @@ function buildProbeTargets(params: {
           const profile = store.profiles[profileId];
           const mode = profile?.type;
           const label = resolveAuthProfileDisplayLabel({ cfg, store, profileId });
+          if (explicitOrder && !explicitOrder.includes(profileId)) {
+            results.push({
+              provider: providerKey,
+              model: model ? `${model.provider}/${model.model}` : undefined,
+              profileId,
+              label,
+              source: "profile",
+              mode,
+              status: "unknown",
+              error: "Excluded by auth.order for this provider.",
+            });
+            continue;
+          }
+          if (allowedProfiles && !allowedProfiles.has(profileId)) {
+            results.push({
+              provider: providerKey,
+              model: model ? `${model.provider}/${model.model}` : undefined,
+              profileId,
+              label,
+              source: "profile",
+              mode,
+              status: "unknown",
+              error: "Auth profile credentials are missing or expired.",
+            });
+            continue;
+          }
           if (!model) {
             results.push({
               provider: providerKey,
@@ -177,11 +246,15 @@ function buildProbeTargets(params: {
         continue;
       }
 
-      if (profileFilter.size > 0) continue;
+      if (profileFilter.size > 0) {
+        continue;
+      }
 
       const envKey = resolveEnvApiKey(providerKey);
       const customKey = getCustomProviderApiKey(cfg, providerKey);
-      if (!envKey && !customKey) continue;
+      if (!envKey && !customKey) {
+        continue;
+      }
 
       const label = envKey ? "env" : "models.json";
       const source = envKey ? "env" : "models.json";
@@ -214,7 +287,7 @@ function buildProbeTargets(params: {
 }
 
 async function probeTarget(params: {
-  cfg: ClawdbotConfig;
+  cfg: OpenClawConfig;
   agentId: string;
   agentDir: string;
   workspaceDir: string;
@@ -289,7 +362,7 @@ async function probeTarget(params: {
 }
 
 async function runTargetsWithConcurrency(params: {
-  cfg: ClawdbotConfig;
+  cfg: OpenClawConfig;
   targets: AuthProbeTarget[];
   timeoutMs: number;
   maxTokens: number;
@@ -300,7 +373,7 @@ async function runTargetsWithConcurrency(params: {
   const concurrency = Math.max(1, Math.min(targets.length || 1, params.concurrency));
 
   const agentId = resolveDefaultAgentId(cfg);
-  const agentDir = resolveClawdbotAgentDir();
+  const agentDir = resolveOpenClawAgentDir();
   const workspaceDir = resolveAgentWorkspaceDir(cfg, agentId) ?? resolveDefaultAgentWorkspaceDir();
   const sessionDir = resolveSessionTranscriptsDirForAgent(agentId);
 
@@ -314,7 +387,9 @@ async function runTargetsWithConcurrency(params: {
     while (true) {
       const index = cursor;
       cursor += 1;
-      if (index >= targets.length) return;
+      if (index >= targets.length) {
+        return;
+      }
       const target = targets[index];
       onProgress?.({
         completed,
@@ -343,7 +418,7 @@ async function runTargetsWithConcurrency(params: {
 }
 
 export async function runAuthProbes(params: {
-  cfg: ClawdbotConfig;
+  cfg: OpenClawConfig;
   providers: string[];
   modelCandidates: string[];
   options: AuthProbeOptions;
@@ -384,7 +459,9 @@ export async function runAuthProbes(params: {
 }
 
 export function formatProbeLatency(latencyMs?: number | null) {
-  if (!latencyMs && latencyMs !== 0) return "-";
+  if (!latencyMs && latencyMs !== 0) {
+    return "-";
+  }
   return formatMs(latencyMs);
 }
 
@@ -399,9 +476,11 @@ export function groupProbeResults(results: AuthProbeResult[]): Map<string, AuthP
 }
 
 export function sortProbeResults(results: AuthProbeResult[]): AuthProbeResult[] {
-  return results.slice().sort((a, b) => {
+  return results.slice().toSorted((a, b) => {
     const provider = a.provider.localeCompare(b.provider);
-    if (provider !== 0) return provider;
+    if (provider !== 0) {
+      return provider;
+    }
     const aLabel = a.label || a.profileId || "";
     const bLabel = b.label || b.profileId || "";
     return aLabel.localeCompare(bLabel);
@@ -409,6 +488,8 @@ export function sortProbeResults(results: AuthProbeResult[]): AuthProbeResult[] 
 }
 
 export function describeProbeSummary(summary: AuthProbeSummary): string {
-  if (summary.totalTargets === 0) return "No probe targets.";
+  if (summary.totalTargets === 0) {
+    return "No probe targets.";
+  }
   return `Probed ${summary.totalTargets} target${summary.totalTargets === 1 ? "" : "s"} in ${formatMs(summary.durationMs)}`;
 }

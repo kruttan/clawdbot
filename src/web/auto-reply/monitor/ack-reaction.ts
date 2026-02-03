@@ -1,8 +1,9 @@
 import type { loadConfig } from "../../../config/config.js";
+import type { WebInboundMsg } from "../types.js";
+import { shouldAckReactionForWhatsApp } from "../../../channels/ack-reactions.js";
 import { logVerbose } from "../../../globals.js";
 import { sendReactionWhatsApp } from "../../outbound.js";
 import { formatError } from "../../session.js";
-import type { WebInboundMsg } from "../types.js";
 import { resolveGroupActivationFor } from "./group-activation.js";
 
 export function maybeSendAckReaction(params: {
@@ -16,7 +17,9 @@ export function maybeSendAckReaction(params: {
   info: (obj: unknown, msg: string) => void;
   warn: (obj: unknown, msg: string) => void;
 }) {
-  if (!params.msg.id) return;
+  if (!params.msg.id) {
+    return;
+  }
 
   const ackConfig = params.cfg.channels?.whatsapp?.ackReaction;
   const emoji = (ackConfig?.emoji ?? "").trim();
@@ -24,32 +27,29 @@ export function maybeSendAckReaction(params: {
   const groupMode = ackConfig?.group ?? "mentions";
   const conversationIdForCheck = params.msg.conversationId ?? params.msg.from;
 
-  const shouldSendReaction = () => {
-    if (!emoji) return false;
-
-    if (params.msg.chatType === "direct") {
-      return directEnabled;
-    }
-
-    if (params.msg.chatType === "group") {
-      if (groupMode === "never") return false;
-      if (groupMode === "always") return true;
-      if (groupMode === "mentions") {
-        const activation = resolveGroupActivationFor({
+  const activation =
+    params.msg.chatType === "group"
+      ? resolveGroupActivationFor({
           cfg: params.cfg,
           agentId: params.agentId,
           sessionKey: params.sessionKey,
           conversationId: conversationIdForCheck,
-        });
-        if (activation === "always") return true;
-        return params.msg.wasMentioned === true;
-      }
-    }
+        })
+      : null;
+  const shouldSendReaction = () =>
+    shouldAckReactionForWhatsApp({
+      emoji,
+      isDirect: params.msg.chatType === "direct",
+      isGroup: params.msg.chatType === "group",
+      directEnabled,
+      groupMode,
+      wasMentioned: params.msg.wasMentioned === true,
+      groupActivated: activation === "always",
+    });
 
-    return false;
-  };
-
-  if (!shouldSendReaction()) return;
+  if (!shouldSendReaction()) {
+    return;
+  }
 
   params.info(
     { chatId: params.msg.chatId, messageId: params.msg.id, emoji },

@@ -69,7 +69,7 @@ async function withTempHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
       vi.mocked(abortEmbeddedPiRun).mockClear();
       return await fn(home);
     },
-    { prefix: "clawdbot-triggers-" },
+    { prefix: "openclaw-triggers-" },
   );
 }
 
@@ -78,7 +78,7 @@ function makeCfg(home: string) {
     agents: {
       defaults: {
         model: "anthropic/claude-opus-4-5",
-        workspace: join(home, "clawd"),
+        workspace: join(home, "openclaw"),
       },
     },
     channels: {
@@ -97,7 +97,7 @@ afterEach(() => {
 describe("trigger handling", () => {
   it("includes the error cause when the embedded agent throws", async () => {
     await withTempHome(async (home) => {
-      vi.mocked(runEmbeddedPiAgent).mockRejectedValue(new Error("sandbox is not defined"));
+      vi.mocked(runEmbeddedPiAgent).mockRejectedValue(new Error("sandbox is not defined."));
 
       const res = await getReplyFromConfig(
         {
@@ -111,7 +111,7 @@ describe("trigger handling", () => {
 
       const text = Array.isArray(res) ? res[0]?.text : res?.text;
       expect(text).toBe(
-        "⚠️ Agent failed before reply: sandbox is not defined. Check gateway logs for details.",
+        "⚠️ Agent failed before reply: sandbox is not defined.\nLogs: openclaw logs --follow",
       );
       expect(runEmbeddedPiAgent).toHaveBeenCalledOnce();
     });

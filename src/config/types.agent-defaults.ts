@@ -1,3 +1,4 @@
+import type { ChannelId } from "../channels/plugins/types.js";
 import type {
   BlockStreamingChunkConfig,
   BlockStreamingCoalesceConfig,
@@ -121,7 +122,7 @@ export type AgentDefaultsConfig = {
    * Include elapsed time in message envelopes ("on" | "off", default: "on").
    */
   envelopeElapsed?: "on" | "off";
-  /** Optional display-only context window override (used for % in status UIs). */
+  /** Optional context window cap (used for runtime estimates + status %). */
   contextTokens?: number;
   /** Optional CLI backends for text-only fallback (claude-cli, etc.). */
   cliBackends?: Record<string, CliBackendConfig>;
@@ -177,18 +178,8 @@ export type AgentDefaultsConfig = {
     model?: string;
     /** Session key for heartbeat runs ("main" or explicit session key). */
     session?: string;
-    /** Delivery target (last|whatsapp|telegram|discord|slack|mattermost|msteams|signal|imessage|none). */
-    target?:
-      | "last"
-      | "whatsapp"
-      | "telegram"
-      | "discord"
-      | "slack"
-      | "mattermost"
-      | "msteams"
-      | "signal"
-      | "imessage"
-      | "none";
+    /** Delivery target ("last", "none", or a channel id). */
+    target?: "last" | "none" | ChannelId;
     /** Optional delivery override (E.164 for WhatsApp, chat id for Telegram). */
     to?: string;
     /** Override the heartbeat prompt body (default: "Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK."). */
@@ -213,6 +204,8 @@ export type AgentDefaultsConfig = {
     archiveAfterMinutes?: number;
     /** Default model selection for spawned sub-agents (string or {primary,fallbacks}). */
     model?: string | { primary?: string; fallbacks?: string[] };
+    /** Default thinking level for spawned sub-agents (e.g. "off", "low", "medium", "high"). */
+    thinking?: string;
   };
   /** Optional sandbox settings for non-main sessions. */
   sandbox?: {
@@ -253,6 +246,8 @@ export type AgentCompactionConfig = {
   mode?: AgentCompactionMode;
   /** Minimum reserve tokens enforced for Pi compaction (0 disables the floor). */
   reserveTokensFloor?: number;
+  /** Max share of context window for history during safeguard pruning (0.1–0.9, default 0.5). */
+  maxHistoryShare?: number;
   /** Pre-compaction memory flush (agentic turn). Default: enabled. */
   memoryFlush?: AgentCompactionMemoryFlushConfig;
 };

@@ -3,11 +3,11 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import { WebSocket } from "ws";
-import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../utils/message-channel.js";
 import { emitAgentEvent, registerAgentRunContext } from "../infra/agent-events.js";
+import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../utils/message-channel.js";
 import {
-  agentCommand,
   connectOk,
+  getReplyFromConfig,
   installGatewayTestHooks,
   onceMessage,
   rpcReq,
@@ -38,7 +38,9 @@ afterAll(async () => {
 async function waitFor(condition: () => boolean, timeoutMs = 1500) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (condition()) return;
+    if (condition()) {
+      return;
+    }
     await new Promise((r) => setTimeout(r, 5));
   }
   throw new Error("timeout waiting for condition");
@@ -71,7 +73,7 @@ describe("gateway server chat", () => {
       webchatWs.close();
       webchatWs = undefined;
 
-      const spy = vi.mocked(agentCommand);
+      const spy = vi.mocked(getReplyFromConfig);
       spy.mockClear();
       testState.agentConfig = { timeoutSeconds: 123 };
       const callsBeforeTimeout = spy.mock.calls.length;
@@ -83,8 +85,8 @@ describe("gateway server chat", () => {
       expect(timeoutRes.ok).toBe(true);
 
       await waitFor(() => spy.mock.calls.length > callsBeforeTimeout);
-      const timeoutCall = spy.mock.calls.at(-1)?.[0] as { timeout?: string } | undefined;
-      expect(timeoutCall?.timeout).toBe("123");
+      const timeoutCall = spy.mock.calls.at(-1)?.[1] as { runId?: string } | undefined;
+      expect(timeoutCall?.runId).toBe("idem-timeout-1");
       testState.agentConfig = undefined;
 
       spy.mockClear();
@@ -97,10 +99,10 @@ describe("gateway server chat", () => {
       expect(sessionRes.ok).toBe(true);
 
       await waitFor(() => spy.mock.calls.length > callsBeforeSession);
-      const sessionCall = spy.mock.calls.at(-1)?.[0] as { sessionKey?: string } | undefined;
-      expect(sessionCall?.sessionKey).toBe("agent:main:subagent:abc");
+      const sessionCall = spy.mock.calls.at(-1)?.[0] as { SessionKey?: string } | undefined;
+      expect(sessionCall?.SessionKey).toBe("agent:main:subagent:abc");
 
-      const sendPolicyDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-gw-"));
+      const sendPolicyDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-gw-"));
       tempDirs.push(sendPolicyDir);
       testState.sessionStorePath = path.join(sendPolicyDir, "sessions.json");
       testState.sessionConfig = {
@@ -139,7 +141,7 @@ describe("gateway server chat", () => {
       testState.sessionStorePath = undefined;
       testState.sessionConfig = undefined;
 
-      const agentBlockedDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-gw-"));
+      const agentBlockedDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-gw-"));
       tempDirs.push(agentBlockedDir);
       testState.sessionStorePath = path.join(agentBlockedDir, "sessions.json");
       testState.sessionConfig = {
@@ -203,12 +205,45 @@ describe("gateway server chat", () => {
       expect(imgRes.payload?.runId).toBeDefined();
 
       await waitFor(() => spy.mock.calls.length > callsBeforeImage, 8000);
-      const imgCall = spy.mock.calls.at(-1)?.[0] as
+      const imgOpts = spy.mock.calls.at(-1)?.[1] as
         | { images?: Array<{ type: string; data: string; mimeType: string }> }
         | undefined;
-      expect(imgCall?.images).toEqual([{ type: "image", data: pngB64, mimeType: "image/png" }]);
+      expect(imgOpts?.images).toEqual([{ type: "image", data: pngB64, mimeType: "image/png" }]);
 
-      const historyDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-gw-"));
+      const callsBeforeImageOnly = spy.mock.calls.length;
+      const reqIdOnly = "chat-img-only";
+      ws.send(
+        JSON.stringify({
+          type: "req",
+          id: reqIdOnly,
+          method: "chat.send",
+          params: {
+            sessionKey: "main",
+            message: "",
+            idempotencyKey: "idem-img-only",
+            attachments: [
+              {
+                type: "image",
+                mimeType: "image/png",
+                fileName: "dot.png",
+                content: `data:image/png;base64,${pngB64}`,
+              },
+            ],
+          },
+        }),
+      );
+
+      const imgOnlyRes = await onceMessage(ws, (o) => o.type === "res" && o.id === reqIdOnly, 8000);
+      expect(imgOnlyRes.ok).toBe(true);
+      expect(imgOnlyRes.payload?.runId).toBeDefined();
+
+      await waitFor(() => spy.mock.calls.length > callsBeforeImageOnly, 8000);
+      const imgOnlyOpts = spy.mock.calls.at(-1)?.[1] as
+        | { images?: Array<{ type: string; data: string; mimeType: string }> }
+        | undefined;
+      expect(imgOnlyOpts?.images).toEqual([{ type: "image", data: pngB64, mimeType: "image/png" }]);
+
+      const historyDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-gw-"));
       tempDirs.push(historyDir);
       testState.sessionStorePath = path.join(historyDir, "sessions.json");
       await writeSessionStore({
@@ -240,11 +275,17 @@ describe("gateway server chat", () => {
       expect(defaultRes.ok).toBe(true);
       const defaultMsgs = defaultRes.payload?.messages ?? [];
       const firstContentText = (msg: unknown): string | undefined => {
-        if (!msg || typeof msg !== "object") return undefined;
+        if (!msg || typeof msg !== "object") {
+          return undefined;
+        }
         const content = (msg as { content?: unknown }).content;
-        if (!Array.isArray(content) || content.length === 0) return undefined;
+        if (!Array.isArray(content) || content.length === 0) {
+          return undefined;
+        }
         const first = content[0];
-        if (!first || typeof first !== "object") return undefined;
+        if (!first || typeof first !== "object") {
+          return undefined;
+        }
         const text = (first as { text?: unknown }).text;
         return typeof text === "string" ? text : undefined;
       };
@@ -254,13 +295,15 @@ describe("gateway server chat", () => {
       testState.agentConfig = undefined;
       testState.sessionStorePath = undefined;
       testState.sessionConfig = undefined;
-      if (webchatWs) webchatWs.close();
+      if (webchatWs) {
+        webchatWs.close();
+      }
       await Promise.all(tempDirs.map((dir) => fs.rm(dir, { recursive: true, force: true })));
     }
   });
 
   test("routes chat.send slash commands without agent runs", async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-gw-"));
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-gw-"));
     try {
       testState.sessionStorePath = path.join(dir, "sessions.json");
       await writeSessionStore({
@@ -299,7 +342,7 @@ describe("gateway server chat", () => {
   });
 
   test("agent events include sessionKey and agent.wait covers lifecycle flows", async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-gw-"));
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-gw-"));
     testState.sessionStorePath = path.join(dir, "sessions.json");
     await writeSessionStore({
       entries: {

@@ -1,17 +1,42 @@
+import { resolveAgentDir } from "../agents/agent-scope.js";
 // @ts-nocheck
-import { resolveEffectiveMessagesConfig, resolveIdentityName } from "../agents/identity.js";
 import {
-  extractShortModelName,
-  type ResponsePrefixContext,
-} from "../auto-reply/reply/response-prefix-template.js";
+  findModelInCatalog,
+  loadModelCatalog,
+  modelSupportsVision,
+} from "../agents/model-catalog.js";
+import { resolveDefaultModelForAgent } from "../agents/model-selection.js";
 import { EmbeddedBlockChunker } from "../agents/pi-embedded-block-chunker.js";
-import { clearHistoryEntries } from "../auto-reply/reply/history.js";
+import { resolveChunkMode } from "../auto-reply/chunk.js";
+import { clearHistoryEntriesIfEnabled } from "../auto-reply/reply/history.js";
 import { dispatchReplyWithBufferedBlockDispatcher } from "../auto-reply/reply/provider-dispatcher.js";
-import { danger, logVerbose } from "../globals.js";
+import { removeAckReactionAfterReply } from "../channels/ack-reactions.js";
+import { logAckFailure, logTypingFailure } from "../channels/logging.js";
+import { createReplyPrefixContext } from "../channels/reply-prefix.js";
+import { createTypingCallbacks } from "../channels/typing.js";
+import { OpenClawConfig } from "../config/config.js";
 import { resolveMarkdownTableMode } from "../config/markdown-tables.js";
+import { danger, logVerbose } from "../globals.js";
 import { deliverReplies } from "./bot/delivery.js";
 import { resolveTelegramDraftStreamingChunking } from "./draft-chunking.js";
 import { createTelegramDraftStream } from "./draft-stream.js";
+import { cacheSticker, describeStickerImage } from "./sticker-cache.js";
+
+const EMPTY_RESPONSE_FALLBACK = "No response generated. Please try again.";
+
+async function resolveStickerVisionSupport(cfg: OpenClawConfig, agentId: string) {
+  try {
+    const catalog = await loadModelCatalog({ config: cfg });
+    const defaultModel = resolveDefaultModelForAgent({ cfg, agentId });
+    const entry = findModelInCatalog(catalog, defaultModel.provider, defaultModel.model);
+    if (!entry) {
+      return false;
+    }
+    return modelSupportsVision(entry);
+  } catch {
+    return false;
+  }
+}
 
 export const dispatchTelegramMessage = async ({
   context,
@@ -24,14 +49,15 @@ export const dispatchTelegramMessage = async ({
   telegramCfg,
   opts,
   resolveBotTopicsEnabled,
-}) => {
+  // oxlint-disable-next-line typescript/no-explicit-any
+}: any) => {
   const {
     ctxPayload,
     primaryCtx,
     msg,
     chatId,
     isGroup,
-    resolvedThreadId,
+    threadSpec,
     historyKey,
     historyLimit,
     groupHistories,
@@ -45,11 +71,12 @@ export const dispatchTelegramMessage = async ({
   } = context;
 
   const isPrivateChat = msg.chat.type === "private";
+  const draftThreadId = threadSpec.id;
   const draftMaxChars = Math.min(textLimit, 4096);
   const canStreamDraft =
     streamMode !== "off" &&
     isPrivateChat &&
-    typeof resolvedThreadId === "number" &&
+    typeof draftThreadId === "number" &&
     (await resolveBotTopicsEnabled(primaryCtx));
   const draftStream = canStreamDraft
     ? createTelegramDraftStream({
@@ -57,7 +84,7 @@ export const dispatchTelegramMessage = async ({
         chatId,
         draftId: msg.message_id || Date.now(),
         maxChars: draftMaxChars,
-        messageThreadId: resolvedThreadId,
+        thread: threadSpec,
         log: logVerbose,
         warn: logVerbose,
       })
@@ -70,8 +97,12 @@ export const dispatchTelegramMessage = async ({
   let lastPartialText = "";
   let draftText = "";
   const updateDraftFromPartial = (text?: string) => {
-    if (!draftStream || !text) return;
-    if (text === lastPartialText) return;
+    if (!draftStream || !text) {
+      return;
+    }
+    if (text === lastPartialText) {
+      return;
+    }
     if (streamMode === "partial") {
       lastPartialText = text;
       draftStream.update(text);
@@ -86,7 +117,9 @@ export const dispatchTelegramMessage = async ({
       draftText = "";
     }
     lastPartialText = text;
-    if (!delta) return;
+    if (!delta) {
+      return;
+    }
     if (!draftChunker) {
       draftText = text;
       draftStream.update(draftText);
@@ -102,7 +135,9 @@ export const dispatchTelegramMessage = async ({
     });
   };
   const flushDraft = async () => {
-    if (!draftStream) return;
+    if (!draftStream) {
+      return;
+    }
     if (draftChunker?.hasBuffered()) {
       draftChunker.drain({
         force: true,
@@ -111,7 +146,9 @@ export const dispatchTelegramMessage = async ({
         },
       });
       draftChunker.reset();
-      if (draftText) draftStream.update(draftText);
+      if (draftText) {
+        draftStream.update(draftText);
+      }
     }
     await draftStream.flush();
   };
@@ -120,28 +157,85 @@ export const dispatchTelegramMessage = async ({
     Boolean(draftStream) ||
     (typeof telegramCfg.blockStreaming === "boolean" ? !telegramCfg.blockStreaming : undefined);
 
-  // Create mutable context for response prefix template interpolation
-  let prefixContext: ResponsePrefixContext = {
-    identityName: resolveIdentityName(cfg, route.agentId),
-  };
+  const prefixContext = createReplyPrefixContext({ cfg, agentId: route.agentId });
   const tableMode = resolveMarkdownTableMode({
     cfg,
     channel: "telegram",
     accountId: route.accountId,
   });
+  const chunkMode = resolveChunkMode(cfg, "telegram", route.accountId);
+
+  // Handle uncached stickers: get a dedicated vision description before dispatch
+  // This ensures we cache a raw description rather than a conversational response
+  const sticker = ctxPayload.Sticker;
+  if (sticker?.fileUniqueId && ctxPayload.MediaPath) {
+    const agentDir = resolveAgentDir(cfg, route.agentId);
+    const stickerSupportsVision = await resolveStickerVisionSupport(cfg, route.agentId);
+    let description = sticker.cachedDescription ?? null;
+    if (!description) {
+      description = await describeStickerImage({
+        imagePath: ctxPayload.MediaPath,
+        cfg,
+        agentDir,
+        agentId: route.agentId,
+      });
+    }
+    if (description) {
+      // Format the description with sticker context
+      const stickerContext = [sticker.emoji, sticker.setName ? `from "${sticker.setName}"` : null]
+        .filter(Boolean)
+        .join(" ");
+      const formattedDesc = `[Sticker${stickerContext ? ` ${stickerContext}` : ""}] ${description}`;
+
+      sticker.cachedDescription = description;
+      if (!stickerSupportsVision) {
+        // Update context to use description instead of image
+        ctxPayload.Body = formattedDesc;
+        ctxPayload.BodyForAgent = formattedDesc;
+        // Clear media paths so native vision doesn't process the image again
+        ctxPayload.MediaPath = undefined;
+        ctxPayload.MediaType = undefined;
+        ctxPayload.MediaUrl = undefined;
+        ctxPayload.MediaPaths = undefined;
+        ctxPayload.MediaUrls = undefined;
+        ctxPayload.MediaTypes = undefined;
+      }
+
+      // Cache the description for future encounters
+      cacheSticker({
+        fileId: sticker.fileId,
+        fileUniqueId: sticker.fileUniqueId,
+        emoji: sticker.emoji,
+        setName: sticker.setName,
+        description,
+        cachedAt: new Date().toISOString(),
+        receivedFrom: ctxPayload.From,
+      });
+      logVerbose(`telegram: cached sticker description for ${sticker.fileUniqueId}`);
+    }
+  }
+
+  const replyQuoteText =
+    ctxPayload.ReplyToIsQuote && ctxPayload.ReplyToBody
+      ? ctxPayload.ReplyToBody.trim() || undefined
+      : undefined;
+  const deliveryState = {
+    delivered: false,
+    skippedNonSilent: 0,
+  };
 
   const { queuedFinal } = await dispatchReplyWithBufferedBlockDispatcher({
     ctx: ctxPayload,
     cfg,
     dispatcherOptions: {
-      responsePrefix: resolveEffectiveMessagesConfig(cfg, route.agentId).responsePrefix,
-      responsePrefixContextProvider: () => prefixContext,
+      responsePrefix: prefixContext.responsePrefix,
+      responsePrefixContextProvider: prefixContext.responsePrefixContextProvider,
       deliver: async (payload, info) => {
         if (info.kind === "final") {
           await flushDraft();
           draftStream?.stop();
         }
-        await deliverReplies({
+        const result = await deliverReplies({
           replies: [payload],
           chatId: String(chatId),
           token: opts.token,
@@ -149,52 +243,91 @@ export const dispatchTelegramMessage = async ({
           bot,
           replyToMode,
           textLimit,
-          messageThreadId: resolvedThreadId,
+          thread: threadSpec,
           tableMode,
+          chunkMode,
           onVoiceRecording: sendRecordVoice,
+          linkPreview: telegramCfg.linkPreview,
+          replyQuoteText,
         });
+        if (result.delivered) {
+          deliveryState.delivered = true;
+        }
+      },
+      onSkip: (_payload, info) => {
+        if (info.reason !== "silent") {
+          deliveryState.skippedNonSilent += 1;
+        }
       },
       onError: (err, info) => {
         runtime.error?.(danger(`telegram ${info.kind} reply failed: ${String(err)}`));
       },
-      onReplyStart: sendTyping,
+      onReplyStart: createTypingCallbacks({
+        start: sendTyping,
+        onStartError: (err) => {
+          logTypingFailure({
+            log: logVerbose,
+            channel: "telegram",
+            target: String(chatId),
+            error: err,
+          });
+        },
+      }).onReplyStart,
     },
     replyOptions: {
       skillFilter,
-      onPartialReply: draftStream ? (payload) => updateDraftFromPartial(payload.text) : undefined,
-      onReasoningStream: draftStream
-        ? (payload) => {
-            if (payload.text) draftStream.update(payload.text);
-          }
-        : undefined,
       disableBlockStreaming,
+      onPartialReply: draftStream ? (payload) => updateDraftFromPartial(payload.text) : undefined,
       onModelSelected: (ctx) => {
-        // Mutate the object directly instead of reassigning to ensure the closure sees updates
-        prefixContext.provider = ctx.provider;
-        prefixContext.model = extractShortModelName(ctx.model);
-        prefixContext.modelFull = `${ctx.provider}/${ctx.model}`;
-        prefixContext.thinkingLevel = ctx.thinkLevel ?? "off";
+        prefixContext.onModelSelected(ctx);
       },
     },
   });
   draftStream?.stop();
-  if (!queuedFinal) {
-    if (isGroup && historyKey && historyLimit > 0) {
-      clearHistoryEntries({ historyMap: groupHistories, historyKey });
+  let sentFallback = false;
+  if (!deliveryState.delivered && deliveryState.skippedNonSilent > 0) {
+    const result = await deliverReplies({
+      replies: [{ text: EMPTY_RESPONSE_FALLBACK }],
+      chatId: String(chatId),
+      token: opts.token,
+      runtime,
+      bot,
+      replyToMode,
+      textLimit,
+      thread: threadSpec,
+      tableMode,
+      chunkMode,
+      linkPreview: telegramCfg.linkPreview,
+      replyQuoteText,
+    });
+    sentFallback = result.delivered;
+  }
+
+  const hasFinalResponse = queuedFinal || sentFallback;
+  if (!hasFinalResponse) {
+    if (isGroup && historyKey) {
+      clearHistoryEntriesIfEnabled({ historyMap: groupHistories, historyKey, limit: historyLimit });
     }
     return;
   }
-  if (removeAckAfterReply && ackReactionPromise && msg.message_id && reactionApi) {
-    void ackReactionPromise.then((didAck) => {
-      if (!didAck) return;
-      reactionApi(chatId, msg.message_id, []).catch((err) => {
-        logVerbose(
-          `telegram: failed to remove ack reaction from ${chatId}/${msg.message_id}: ${String(err)}`,
-        );
+  removeAckReactionAfterReply({
+    removeAfterReply: removeAckAfterReply,
+    ackReactionPromise,
+    ackReactionValue: ackReactionPromise ? "ack" : null,
+    remove: () => reactionApi?.(chatId, msg.message_id ?? 0, []) ?? Promise.resolve(),
+    onError: (err) => {
+      if (!msg.message_id) {
+        return;
+      }
+      logAckFailure({
+        log: logVerbose,
+        channel: "telegram",
+        target: `${chatId}/${msg.message_id}`,
+        error: err,
       });
-    });
-  }
-  if (isGroup && historyKey && historyLimit > 0) {
-    clearHistoryEntries({ historyMap: groupHistories, historyKey });
+    },
+  });
+  if (isGroup && historyKey) {
+    clearHistoryEntriesIfEnabled({ historyMap: groupHistories, historyKey, limit: historyLimit });
   }
 };

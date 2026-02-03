@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-
+import { sleep } from "../utils.js";
 import {
   buildGroupDisplayName,
   deriveSessionKey,
@@ -56,11 +56,11 @@ describe("sessions", () => {
       buildGroupDisplayName({
         provider: "discord",
         groupChannel: "#general",
-        space: "friends-of-clawd",
+        space: "friends-of-openclaw",
         id: "123",
         key: "discord:group:123",
       }),
-    ).toBe("discord:friends-of-clawd#general");
+    ).toBe("discord:friends-of-openclaw#general");
   });
 
   it("collapses direct chats to main by default", () => {
@@ -95,7 +95,7 @@ describe("sessions", () => {
 
   it("updateLastRoute persists channel and target", async () => {
     const mainSessionKey = "agent:main:main";
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-sessions-"));
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-sessions-"));
     const storePath = path.join(dir, "sessions.json");
     await fs.writeFile(
       storePath,
@@ -148,7 +148,7 @@ describe("sessions", () => {
 
   it("updateLastRoute prefers explicit deliveryContext", async () => {
     const mainSessionKey = "agent:main:main";
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-sessions-"));
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-sessions-"));
     const storePath = path.join(dir, "sessions.json");
     await fs.writeFile(storePath, "{}", "utf-8");
 
@@ -178,7 +178,7 @@ describe("sessions", () => {
 
   it("updateLastRoute records origin + group metadata when ctx is provided", async () => {
     const sessionKey = "agent:main:whatsapp:group:123@g.us";
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-sessions-"));
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-sessions-"));
     const storePath = path.join(dir, "sessions.json");
     await fs.writeFile(storePath, "{}", "utf-8");
 
@@ -208,7 +208,7 @@ describe("sessions", () => {
 
   it("updateSessionStoreEntry preserves existing fields when patching", async () => {
     const sessionKey = "agent:main:main";
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-sessions-"));
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-sessions-"));
     const storePath = path.join(dir, "sessions.json");
     await fs.writeFile(
       storePath,
@@ -238,7 +238,7 @@ describe("sessions", () => {
   });
 
   it("updateSessionStore preserves concurrent additions", async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-sessions-"));
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-sessions-"));
     const storePath = path.join(dir, "sessions.json");
     await fs.writeFile(storePath, "{}", "utf-8");
 
@@ -256,8 +256,24 @@ describe("sessions", () => {
     expect(store["agent:main:two"]?.sessionId).toBe("sess-2");
   });
 
+  it("recovers from array-backed session stores", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-sessions-"));
+    const storePath = path.join(dir, "sessions.json");
+    await fs.writeFile(storePath, "[]", "utf-8");
+
+    await updateSessionStore(storePath, (store) => {
+      store["agent:main:main"] = { sessionId: "sess-1", updatedAt: 1 };
+    });
+
+    const store = loadSessionStore(storePath);
+    expect(store["agent:main:main"]?.sessionId).toBe("sess-1");
+
+    const raw = await fs.readFile(storePath, "utf-8");
+    expect(raw.trim().startsWith("{")).toBe(true);
+  });
+
   it("normalizes last route fields on write", async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-sessions-"));
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-sessions-"));
     const storePath = path.join(dir, "sessions.json");
     await fs.writeFile(storePath, "{}", "utf-8");
 
@@ -283,7 +299,7 @@ describe("sessions", () => {
   });
 
   it("updateSessionStore keeps deletions when concurrent writes happen", async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-sessions-"));
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-sessions-"));
     const storePath = path.join(dir, "sessions.json");
     await fs.writeFile(
       storePath,
@@ -315,7 +331,7 @@ describe("sessions", () => {
 
   it("loadSessionStore auto-migrates legacy provider keys to channel keys", async () => {
     const mainSessionKey = "agent:main:main";
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-sessions-"));
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-sessions-"));
     const storePath = path.join(dir, "sessions.json");
     await fs.writeFile(
       storePath,
@@ -343,17 +359,17 @@ describe("sessions", () => {
     expect(entry.lastProvider).toBeUndefined();
   });
 
-  it("derives session transcripts dir from CLAWDBOT_STATE_DIR", () => {
+  it("derives session transcripts dir from OPENCLAW_STATE_DIR", () => {
     const dir = resolveSessionTranscriptsDir(
-      { CLAWDBOT_STATE_DIR: "/custom/state" } as NodeJS.ProcessEnv,
+      { OPENCLAW_STATE_DIR: "/custom/state" } as NodeJS.ProcessEnv,
       () => "/home/ignored",
     );
     expect(dir).toBe(path.join(path.resolve("/custom/state"), "agents", "main", "sessions"));
   });
 
   it("includes topic ids in session transcript filenames", () => {
-    const prev = process.env.CLAWDBOT_STATE_DIR;
-    process.env.CLAWDBOT_STATE_DIR = "/custom/state";
+    const prev = process.env.OPENCLAW_STATE_DIR;
+    process.env.OPENCLAW_STATE_DIR = "/custom/state";
     try {
       const sessionFile = resolveSessionTranscriptPath("sess-1", "main", 123);
       expect(sessionFile).toBe(
@@ -367,16 +383,16 @@ describe("sessions", () => {
       );
     } finally {
       if (prev === undefined) {
-        delete process.env.CLAWDBOT_STATE_DIR;
+        delete process.env.OPENCLAW_STATE_DIR;
       } else {
-        process.env.CLAWDBOT_STATE_DIR = prev;
+        process.env.OPENCLAW_STATE_DIR = prev;
       }
     }
   });
 
   it("uses agent id when resolving session file fallback paths", () => {
-    const prev = process.env.CLAWDBOT_STATE_DIR;
-    process.env.CLAWDBOT_STATE_DIR = "/custom/state";
+    const prev = process.env.OPENCLAW_STATE_DIR;
+    process.env.OPENCLAW_STATE_DIR = "/custom/state";
     try {
       const sessionFile = resolveSessionFilePath("sess-2", undefined, {
         agentId: "codex",
@@ -386,16 +402,16 @@ describe("sessions", () => {
       );
     } finally {
       if (prev === undefined) {
-        delete process.env.CLAWDBOT_STATE_DIR;
+        delete process.env.OPENCLAW_STATE_DIR;
       } else {
-        process.env.CLAWDBOT_STATE_DIR = prev;
+        process.env.OPENCLAW_STATE_DIR = prev;
       }
     }
   });
 
   it("updateSessionStoreEntry merges concurrent patches", async () => {
     const mainSessionKey = "agent:main:main";
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-sessions-"));
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-sessions-"));
     const storePath = path.join(dir, "sessions.json");
     await fs.writeFile(
       storePath,
@@ -413,7 +429,6 @@ describe("sessions", () => {
       "utf-8",
     );
 
-    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     await Promise.all([
       updateSessionStoreEntry({
         storePath,

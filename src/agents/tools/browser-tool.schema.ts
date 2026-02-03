@@ -1,5 +1,4 @@
 import { Type } from "@sinclair/typebox";
-
 import { optionalStringEnum, stringEnum } from "../schema/typebox.js";
 
 const BROWSER_ACT_KINDS = [
@@ -35,7 +34,7 @@ const BROWSER_TOOL_ACTIONS = [
   "act",
 ] as const;
 
-const BROWSER_TARGETS = ["sandbox", "host", "custom"] as const;
+const BROWSER_TARGETS = ["sandbox", "host", "node"] as const;
 
 const BROWSER_SNAPSHOT_FORMATS = ["aria", "ai"] as const;
 const BROWSER_SNAPSHOT_MODES = ["efficient"] as const;
@@ -84,8 +83,8 @@ const BrowserActSchema = Type.Object({
 export const BrowserToolSchema = Type.Object({
   action: stringEnum(BROWSER_TOOL_ACTIONS),
   target: optionalStringEnum(BROWSER_TARGETS),
+  node: Type.Optional(Type.String()),
   profile: Type.Optional(Type.String()),
-  controlUrl: Type.Optional(Type.String()),
   targetUrl: Type.Optional(Type.String()),
   targetId: Type.Optional(Type.String()),
   limit: Type.Optional(Type.Number()),

@@ -4,7 +4,9 @@ import type {
   GroupPolicy,
   MarkdownConfig,
 } from "./types.base.js";
+import type { ChannelHeartbeatVisibilityConfig } from "./types.channels.js";
 import type { DmConfig } from "./types.messages.js";
+import type { GroupToolPolicyBySenderConfig, GroupToolPolicyConfig } from "./types.tools.js";
 
 export type WhatsAppActionConfig = {
   reactions?: boolean;
@@ -25,7 +27,7 @@ export type WhatsAppConfig = {
   sendReadReceipts?: boolean;
   /**
    * Inbound message prefix (WhatsApp only).
-   * Default: `[{agents.list[].identity.name}]` (or `[clawdbot]`) when allowFrom is empty, else `""`.
+   * Default: `[{agents.list[].identity.name}]` (or `[openclaw]`) when allowFrom is empty, else `""`.
    */
   messagePrefix?: string;
   /** Direct message access policy (default: pairing). */
@@ -53,6 +55,8 @@ export type WhatsAppConfig = {
   dms?: Record<string, DmConfig>;
   /** Outbound text chunk size (chars). Default: 4000. */
   textChunkLimit?: number;
+  /** Chunking mode: "length" (default) splits by size; "newline" splits on every newline. */
+  chunkMode?: "length" | "newline";
   /** Maximum media file size in MB. Default: 50. */
   mediaMaxMb?: number;
   /** Disable block streaming for this account. */
@@ -65,6 +69,8 @@ export type WhatsAppConfig = {
     string,
     {
       requireMention?: boolean;
+      tools?: GroupToolPolicyConfig;
+      toolsBySender?: GroupToolPolicyBySenderConfig;
     }
   >;
   /** Acknowledgment reaction sent immediately upon message receipt. */
@@ -84,6 +90,8 @@ export type WhatsAppConfig = {
   };
   /** Debounce window (ms) for batching rapid consecutive messages from the same sender (0 to disable). */
   debounceMs?: number;
+  /** Heartbeat visibility settings for this channel. */
+  heartbeat?: ChannelHeartbeatVisibilityConfig;
 };
 
 export type WhatsAppAccountConfig = {
@@ -117,6 +125,8 @@ export type WhatsAppAccountConfig = {
   /** Per-DM config overrides keyed by user ID. */
   dms?: Record<string, DmConfig>;
   textChunkLimit?: number;
+  /** Chunking mode: "length" (default) splits by size; "newline" splits on every newline. */
+  chunkMode?: "length" | "newline";
   mediaMaxMb?: number;
   blockStreaming?: boolean;
   /** Merge streamed block replies before sending. */
@@ -125,6 +135,8 @@ export type WhatsAppAccountConfig = {
     string,
     {
       requireMention?: boolean;
+      tools?: GroupToolPolicyConfig;
+      toolsBySender?: GroupToolPolicyBySenderConfig;
     }
   >;
   /** Acknowledgment reaction sent immediately upon message receipt. */
@@ -144,4 +156,6 @@ export type WhatsAppAccountConfig = {
   };
   /** Debounce window (ms) for batching rapid consecutive messages from the same sender (0 to disable). */
   debounceMs?: number;
+  /** Heartbeat visibility settings for this account. */
+  heartbeat?: ChannelHeartbeatVisibilityConfig;
 };

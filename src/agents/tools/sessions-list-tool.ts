@@ -1,17 +1,12 @@
-import path from "node:path";
-
 import { Type } from "@sinclair/typebox";
-
+import path from "node:path";
+import type { AnyAgentTool } from "./common.js";
 import { loadConfig } from "../../config/config.js";
 import { callGateway } from "../../gateway/call.js";
-import {
-  isSubagentSessionKey,
-  normalizeAgentId,
-  parseAgentSessionKey,
-} from "../../routing/session-key.js";
-import type { AnyAgentTool } from "./common.js";
+import { isSubagentSessionKey, resolveAgentIdFromSessionKey } from "../../routing/session-key.js";
 import { jsonResult, readStringArrayParam } from "./common.js";
 import {
+  createAgentToAgentPolicy,
   classifySessionKind,
   deriveChannel,
   resolveDisplaySessionKey,
@@ -82,7 +77,7 @@ export function createSessionsListTool(opts?: {
           : 0;
       const messageLimit = Math.min(messageLimitRaw, 20);
 
-      const list = (await callGateway({
+      const list = await callGateway<{ sessions: Array<SessionListRow>; path: string }>({
         method: "sessions.list",
         params: {
           limit,
@@ -91,51 +86,41 @@ export function createSessionsListTool(opts?: {
           includeUnknown: !restrictToSpawned,
           spawnedBy: restrictToSpawned ? requesterInternalKey : undefined,
         },
-      })) as {
-        path?: string;
-        sessions?: Array<Record<string, unknown>>;
-      };
+      });
 
       const sessions = Array.isArray(list?.sessions) ? list.sessions : [];
       const storePath = typeof list?.path === "string" ? list.path : undefined;
-      const routingA2A = cfg.tools?.agentToAgent;
-      const a2aEnabled = routingA2A?.enabled === true;
-      const allowPatterns = Array.isArray(routingA2A?.allow) ? routingA2A.allow : [];
-      const matchesAllow = (agentId: string) => {
-        if (allowPatterns.length === 0) return true;
-        return allowPatterns.some((pattern) => {
-          const raw = String(pattern ?? "").trim();
-          if (!raw) return false;
-          if (raw === "*") return true;
-          if (!raw.includes("*")) return raw === agentId;
-          const escaped = raw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-          const re = new RegExp(`^${escaped.replaceAll("\\*", ".*")}$`, "i");
-          return re.test(agentId);
-        });
-      };
-      const requesterAgentId = normalizeAgentId(
-        parseAgentSessionKey(requesterInternalKey)?.agentId,
-      );
+      const a2aPolicy = createAgentToAgentPolicy(cfg);
+      const requesterAgentId = resolveAgentIdFromSessionKey(requesterInternalKey);
       const rows: SessionListRow[] = [];
 
       for (const entry of sessions) {
-        if (!entry || typeof entry !== "object") continue;
+        if (!entry || typeof entry !== "object") {
+          continue;
+        }
         const key = typeof entry.key === "string" ? entry.key : "";
-        if (!key) continue;
-
-        const entryAgentId = normalizeAgentId(parseAgentSessionKey(key)?.agentId);
-        const crossAgent = entryAgentId !== requesterAgentId;
-        if (crossAgent) {
-          if (!a2aEnabled) continue;
-          if (!matchesAllow(requesterAgentId) || !matchesAllow(entryAgentId)) continue;
+        if (!key) {
+          continue;
         }
 
-        if (key === "unknown") continue;
-        if (key === "global" && alias !== "global") continue;
+        const entryAgentId = resolveAgentIdFromSessionKey(key);
+        const crossAgent = entryAgentId !== requesterAgentId;
+        if (crossAgent && !a2aPolicy.isAllowed(requesterAgentId, entryAgentId)) {
+          continue;
+        }
+
+        if (key === "unknown") {
+          continue;
+        }
+        if (key === "global" && alias !== "global") {
+          continue;
+        }
 
         const gatewayKind = typeof entry.kind === "string" ? entry.kind : undefined;
         const kind = classifySessionKind({ key, gatewayKind, alias, mainKey });
-        if (allowedKinds && !allowedKinds.has(kind)) continue;
+        if (allowedKinds && !allowedKinds.has(kind)) {
+          continue;
+        }
 
         const displayKey = resolveDisplaySessionKey({
           key,
@@ -209,10 +194,10 @@ export function createSessionsListTool(opts?: {
             alias,
             mainKey,
           });
-          const history = (await callGateway({
+          const history = await callGateway<{ messages: Array<unknown> }>({
             method: "chat.history",
             params: { sessionKey: resolvedKey, limit: messageLimit },
-          })) as { messages?: unknown[] };
+          });
           const rawMessages = Array.isArray(history?.messages) ? history.messages : [];
           const filtered = stripToolMessages(rawMessages);
           row.messages = filtered.length > messageLimit ? filtered.slice(-messageLimit) : filtered;

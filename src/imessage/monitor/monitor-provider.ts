@@ -1,16 +1,9 @@
 import fs from "node:fs/promises";
-
-import {
-  resolveEffectiveMessagesConfig,
-  resolveHumanDelayConfig,
-  resolveIdentityName,
-} from "../../agents/identity.js";
-import {
-  extractShortModelName,
-  type ResponsePrefixContext,
-} from "../../auto-reply/reply/response-prefix-template.js";
+import type { IMessagePayload, MonitorIMessageOpts } from "./types.js";
+import { resolveHumanDelayConfig } from "../../agents/identity.js";
 import { resolveTextChunkLimit } from "../../auto-reply/chunk.js";
 import { hasControlCommand } from "../../auto-reply/command-detection.js";
+import { dispatchInboundMessage } from "../../auto-reply/dispatch.js";
 import {
   formatInboundEnvelope,
   formatInboundFromLabel,
@@ -20,28 +13,26 @@ import {
   createInboundDebouncer,
   resolveInboundDebounceMs,
 } from "../../auto-reply/inbound-debounce.js";
-import { dispatchReplyFromConfig } from "../../auto-reply/reply/dispatch-from-config.js";
-import { finalizeInboundContext } from "../../auto-reply/reply/inbound-context.js";
 import {
   buildPendingHistoryContextFromMap,
-  clearHistoryEntries,
+  clearHistoryEntriesIfEnabled,
   DEFAULT_GROUP_HISTORY_LIMIT,
-  recordPendingHistoryEntry,
+  recordPendingHistoryEntryIfEnabled,
   type HistoryEntry,
 } from "../../auto-reply/reply/history.js";
+import { finalizeInboundContext } from "../../auto-reply/reply/inbound-context.js";
 import { buildMentionRegexes, matchesMentionPatterns } from "../../auto-reply/reply/mentions.js";
 import { createReplyDispatcher } from "../../auto-reply/reply/reply-dispatcher.js";
+import { resolveControlCommandGate } from "../../channels/command-gating.js";
+import { logInboundDrop } from "../../channels/logging.js";
+import { createReplyPrefixContext } from "../../channels/reply-prefix.js";
+import { recordInboundSession } from "../../channels/session.js";
 import { loadConfig } from "../../config/config.js";
 import {
   resolveChannelGroupPolicy,
   resolveChannelGroupRequireMention,
 } from "../../config/group-policy.js";
-import {
-  readSessionUpdatedAt,
-  recordSessionMetaFromInbound,
-  resolveStorePath,
-  updateLastRoute,
-} from "../../config/sessions.js";
+import { readSessionUpdatedAt, resolveStorePath } from "../../config/sessions.js";
 import { danger, logVerbose, shouldLogVerbose } from "../../globals.js";
 import { waitForTransportReady } from "../../infra/transport-ready.js";
 import { mediaKindFromMime } from "../../media/constants.js";
@@ -52,7 +43,6 @@ import {
 } from "../../pairing/pairing-store.js";
 import { resolveAgentRoute } from "../../routing/resolve-route.js";
 import { truncateUtf16Safe } from "../../utils.js";
-import { resolveCommandAuthorizedFromAuthorizers } from "../../channels/command-gating.js";
 import { resolveIMessageAccount } from "../accounts.js";
 import { createIMessageRpcClient } from "../client.js";
 import { probeIMessage } from "../probe.js";
@@ -64,11 +54,10 @@ import {
 } from "../targets.js";
 import { deliverReplies } from "./deliver.js";
 import { normalizeAllowList, resolveRuntime } from "./runtime.js";
-import type { IMessagePayload, MonitorIMessageOpts } from "./types.js";
 
 /**
  * Try to detect remote host from an SSH wrapper script like:
- *   exec ssh -T clawdbot@192.168.64.3 /opt/homebrew/bin/imsg "$@"
+ *   exec ssh -T openclaw@192.168.64.3 /opt/homebrew/bin/imsg "$@"
  *   exec ssh -T mac-mini imsg "$@"
  * Returns the user@host or host portion if found, undefined otherwise.
  */
@@ -80,9 +69,11 @@ async function detectRemoteHostFromCliPath(cliPath: string): Promise<string | un
       : cliPath;
     const content = await fs.readFile(expanded, "utf8");
 
-    // Match user@host pattern first (e.g., clawdbot@192.168.64.3)
+    // Match user@host pattern first (e.g., openclaw@192.168.64.3)
     const userHostMatch = content.match(/\bssh\b[^\n]*?\s+([a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+)/);
-    if (userHostMatch) return userHostMatch[1];
+    if (userHostMatch) {
+      return userHostMatch[1];
+    }
 
     // Fallback: match host-only before imsg command (e.g., ssh -T mac-mini imsg)
     const hostOnlyMatch = content.match(/\bssh\b[^\n]*?\s+([a-zA-Z][a-zA-Z0-9._-]*)\s+\S*\bimsg\b/);
@@ -103,13 +94,17 @@ function normalizeReplyField(value: unknown): string | undefined {
     const trimmed = value.trim();
     return trimmed ? trimmed : undefined;
   }
-  if (typeof value === "number") return String(value);
+  if (typeof value === "number") {
+    return String(value);
+  }
   return undefined;
 }
 
 function describeReplyContext(message: IMessagePayload): IMessageReplyContext | null {
   const body = normalizeReplyField(message.reply_to_text);
-  if (!body) return null;
+  if (!body) {
+    return null;
+  }
   const id = normalizeReplyField(message.reply_to_id);
   const sender = normalizeReplyField(message.reply_to_sender);
   return { body, id, sender };
@@ -159,7 +154,9 @@ export async function monitorIMessageProvider(opts: MonitorIMessageOpts = {}): P
     debounceMs: inboundDebounceMs,
     buildKey: (entry) => {
       const sender = entry.message.sender?.trim();
-      if (!sender) return null;
+      if (!sender) {
+        return null;
+      }
       const conversationId =
         entry.message.chat_id != null
           ? `chat:${entry.message.chat_id}`
@@ -168,13 +165,19 @@ export async function monitorIMessageProvider(opts: MonitorIMessageOpts = {}): P
     },
     shouldDebounce: (entry) => {
       const text = entry.message.text?.trim() ?? "";
-      if (!text) return false;
-      if (entry.message.attachments && entry.message.attachments.length > 0) return false;
+      if (!text) {
+        return false;
+      }
+      if (entry.message.attachments && entry.message.attachments.length > 0) {
+        return false;
+      }
       return !hasControlCommand(text, cfg);
     },
     onFlush: async (entries) => {
       const last = entries.at(-1);
-      if (!last) return;
+      if (!last) {
+        return;
+      }
       if (entries.length === 1) {
         await handleMessageNow(last.message);
         return;
@@ -198,9 +201,13 @@ export async function monitorIMessageProvider(opts: MonitorIMessageOpts = {}): P
   async function handleMessageNow(message: IMessagePayload) {
     const senderRaw = message.sender ?? "";
     const sender = senderRaw.trim();
-    if (!sender) return;
+    if (!sender) {
+      return;
+    }
     const senderNormalized = normalizeIMessageHandle(sender);
-    if (message.is_from_me) return;
+    if (message.is_from_me) {
+      return;
+    }
 
     const chatId = message.chat_id ?? undefined;
     const chatGuid = message.chat_guid ?? undefined;
@@ -230,7 +237,9 @@ export async function monitorIMessageProvider(opts: MonitorIMessageOpts = {}): P
     );
 
     const isGroup = Boolean(message.is_group) || treatAsGroupByConfig;
-    if (isGroup && !chatId) return;
+    if (isGroup && !chatId) {
+      return;
+    }
 
     const groupId = isGroup ? groupIdCandidate : undefined;
     const storeAllowFrom = await readChannelAllowFromStore("imessage").catch(() => []);
@@ -283,7 +292,9 @@ export async function monitorIMessageProvider(opts: MonitorIMessageOpts = {}): P
               chatIdentifier,
             }));
     if (!isGroup) {
-      if (dmPolicy === "disabled") return;
+      if (dmPolicy === "disabled") {
+        return;
+      }
       if (!dmAuthorized) {
         if (dmPolicy === "pairing") {
           const senderId = normalizeIMessageHandle(sender);
@@ -346,7 +357,9 @@ export async function monitorIMessageProvider(opts: MonitorIMessageOpts = {}): P
     const kind = mediaKindFromMime(mediaType ?? undefined);
     const placeholder = kind ? `<media:${kind}>` : attachments?.length ? "<media:attachment>" : "";
     const bodyText = messageText || placeholder;
-    if (!bodyText) return;
+    if (!bodyText) {
+      return;
+    }
     const replyContext = describeReplyContext(message);
     const createdAt = message.created_at ? Date.parse(message.created_at) : undefined;
     const historyKey = isGroup
@@ -383,41 +396,44 @@ export async function monitorIMessageProvider(opts: MonitorIMessageOpts = {}): P
             chatIdentifier,
           })
         : false;
-    const commandAuthorized = isGroup
-      ? resolveCommandAuthorizedFromAuthorizers({
-          useAccessGroups,
-          authorizers: [
-            { configured: effectiveDmAllowFrom.length > 0, allowed: ownerAllowedForCommands },
-            { configured: effectiveGroupAllowFrom.length > 0, allowed: groupAllowedForCommands },
-          ],
-        })
-      : dmAuthorized;
-    if (isGroup && hasControlCommand(messageText, cfg) && !commandAuthorized) {
-      logVerbose(`imessage: drop control command from unauthorized sender ${sender}`);
+    const hasControlCommandInMessage = hasControlCommand(messageText, cfg);
+    const commandGate = resolveControlCommandGate({
+      useAccessGroups,
+      authorizers: [
+        { configured: effectiveDmAllowFrom.length > 0, allowed: ownerAllowedForCommands },
+        { configured: effectiveGroupAllowFrom.length > 0, allowed: groupAllowedForCommands },
+      ],
+      allowTextCommands: true,
+      hasControlCommand: hasControlCommandInMessage,
+    });
+    const commandAuthorized = isGroup ? commandGate.commandAuthorized : dmAuthorized;
+    if (isGroup && commandGate.shouldBlock) {
+      logInboundDrop({
+        log: logVerbose,
+        channel: "imessage",
+        reason: "control command (unauthorized)",
+        target: sender,
+      });
       return;
     }
     const shouldBypassMention =
-      isGroup &&
-      requireMention &&
-      !mentioned &&
-      commandAuthorized &&
-      hasControlCommand(messageText);
+      isGroup && requireMention && !mentioned && commandAuthorized && hasControlCommandInMessage;
     const effectiveWasMentioned = mentioned || shouldBypassMention;
     if (isGroup && requireMention && canDetectMention && !mentioned && !shouldBypassMention) {
       logVerbose(`imessage: skipping group message (no mention)`);
-      if (historyKey && historyLimit > 0) {
-        recordPendingHistoryEntry({
-          historyMap: groupHistories,
-          historyKey,
-          limit: historyLimit,
-          entry: {
-            sender: senderNormalized,
-            body: bodyText,
-            timestamp: createdAt,
-            messageId: message.id ? String(message.id) : undefined,
-          },
-        });
-      }
+      recordPendingHistoryEntryIfEnabled({
+        historyMap: groupHistories,
+        historyKey: historyKey ?? "",
+        limit: historyLimit,
+        entry: historyKey
+          ? {
+              sender: senderNormalized,
+              body: bodyText,
+              timestamp: createdAt,
+              messageId: message.id ? String(message.id) : undefined,
+            }
+          : null,
+      });
       return;
     }
 
@@ -454,7 +470,7 @@ export async function monitorIMessageProvider(opts: MonitorIMessageOpts = {}): P
       envelope: envelopeOptions,
     });
     let combinedBody = body;
-    if (isGroup && historyKey && historyLimit > 0) {
+    if (isGroup && historyKey) {
       combinedBody = buildPendingHistoryContextFromMap({
         historyMap: groupHistories,
         historyKey,
@@ -509,29 +525,24 @@ export async function monitorIMessageProvider(opts: MonitorIMessageOpts = {}): P
       OriginatingTo: imessageTo,
     });
 
-    void recordSessionMetaFromInbound({
+    const updateTarget = (isGroup ? chatTarget : undefined) || sender;
+    await recordInboundSession({
       storePath,
       sessionKey: ctxPayload.SessionKey ?? route.sessionKey,
       ctx: ctxPayload,
-    }).catch((err) => {
-      logVerbose(`imessage: failed updating session meta: ${String(err)}`);
+      updateLastRoute:
+        !isGroup && updateTarget
+          ? {
+              sessionKey: route.mainSessionKey,
+              channel: "imessage",
+              to: updateTarget,
+              accountId: route.accountId,
+            }
+          : undefined,
+      onRecordError: (err) => {
+        logVerbose(`imessage: failed updating session meta: ${String(err)}`);
+      },
     });
-
-    if (!isGroup) {
-      const to = (isGroup ? chatTarget : undefined) || sender;
-      if (to) {
-        await updateLastRoute({
-          storePath,
-          sessionKey: route.mainSessionKey,
-          deliveryContext: {
-            channel: "imessage",
-            to,
-            accountId: route.accountId,
-          },
-          ctx: ctxPayload,
-        });
-      }
-    }
 
     if (shouldLogVerbose()) {
       const preview = truncateUtf16Safe(body, 200).replace(/\n/g, "\\n");
@@ -540,14 +551,11 @@ export async function monitorIMessageProvider(opts: MonitorIMessageOpts = {}): P
       );
     }
 
-    // Create mutable context for response prefix template interpolation
-    let prefixContext: ResponsePrefixContext = {
-      identityName: resolveIdentityName(cfg, route.agentId),
-    };
+    const prefixContext = createReplyPrefixContext({ cfg, agentId: route.agentId });
 
     const dispatcher = createReplyDispatcher({
-      responsePrefix: resolveEffectiveMessagesConfig(cfg, route.agentId).responsePrefix,
-      responsePrefixContextProvider: () => prefixContext,
+      responsePrefix: prefixContext.responsePrefix,
+      responsePrefixContextProvider: prefixContext.responsePrefixContextProvider,
       humanDelay: resolveHumanDelayConfig(cfg, route.agentId),
       deliver: async (payload) => {
         await deliverReplies({
@@ -565,7 +573,7 @@ export async function monitorIMessageProvider(opts: MonitorIMessageOpts = {}): P
       },
     });
 
-    const { queuedFinal } = await dispatchReplyFromConfig({
+    const { queuedFinal } = await dispatchInboundMessage({
       ctx: ctxPayload,
       cfg,
       dispatcher,
@@ -574,30 +582,30 @@ export async function monitorIMessageProvider(opts: MonitorIMessageOpts = {}): P
           typeof accountInfo.config.blockStreaming === "boolean"
             ? !accountInfo.config.blockStreaming
             : undefined,
-        onModelSelected: (ctx) => {
-          // Mutate the object directly instead of reassigning to ensure the closure sees updates
-          prefixContext.provider = ctx.provider;
-          prefixContext.model = extractShortModelName(ctx.model);
-          prefixContext.modelFull = `${ctx.provider}/${ctx.model}`;
-          prefixContext.thinkingLevel = ctx.thinkLevel ?? "off";
-        },
+        onModelSelected: prefixContext.onModelSelected,
       },
     });
     if (!queuedFinal) {
-      if (isGroup && historyKey && historyLimit > 0) {
-        clearHistoryEntries({ historyMap: groupHistories, historyKey });
+      if (isGroup && historyKey) {
+        clearHistoryEntriesIfEnabled({
+          historyMap: groupHistories,
+          historyKey,
+          limit: historyLimit,
+        });
       }
       return;
     }
-    if (isGroup && historyKey && historyLimit > 0) {
-      clearHistoryEntries({ historyMap: groupHistories, historyKey });
+    if (isGroup && historyKey) {
+      clearHistoryEntriesIfEnabled({ historyMap: groupHistories, historyKey, limit: historyLimit });
     }
   }
 
   const handleMessage = async (raw: unknown) => {
     const params = raw as { message?: IMessagePayload | null };
     const message = params?.message ?? null;
-    if (!message) return;
+    if (!message) {
+      return;
+    }
     await inboundDebouncer.enqueue({ message });
   };
 
@@ -611,7 +619,9 @@ export async function monitorIMessageProvider(opts: MonitorIMessageOpts = {}): P
     runtime,
     check: async () => {
       const probe = await probeIMessage(2000, { cliPath, dbPath, runtime });
-      if (probe.ok) return { ok: true };
+      if (probe.ok) {
+        return { ok: true };
+      }
       if (probe.fatal) {
         throw new Error(probe.error ?? "imsg rpc unavailable");
       }
@@ -619,7 +629,9 @@ export async function monitorIMessageProvider(opts: MonitorIMessageOpts = {}): P
     },
   });
 
-  if (opts.abortSignal?.aborted) return;
+  if (opts.abortSignal?.aborted) {
+    return;
+  }
 
   const client = await createIMessageRpcClient({
     cliPath,
@@ -661,7 +673,9 @@ export async function monitorIMessageProvider(opts: MonitorIMessageOpts = {}): P
     subscriptionId = result?.subscription ?? null;
     await client.waitForClose();
   } catch (err) {
-    if (abort?.aborted) return;
+    if (abort?.aborted) {
+      return;
+    }
     runtime.error?.(danger(`imessage: monitor failed: ${String(err)}`));
     throw err;
   } finally {

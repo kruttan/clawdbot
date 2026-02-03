@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import { danger } from "../../globals.js";
-import { normalizeAgentId } from "../../routing/session-key.js";
+import { sanitizeAgentId } from "../../routing/session-key.js";
 import { defaultRuntime } from "../../runtime.js";
 import { addGatewayClientOptions, callGatewayFromCli } from "../gateway-rpc.js";
 import {
@@ -16,7 +16,9 @@ const assignIf = (
   value: unknown,
   shouldAssign: boolean,
 ) => {
-  if (shouldAssign) target[key] = value;
+  if (shouldAssign) {
+    target[key] = value;
+  }
 };
 
 export function registerCronEditCommand(cron: Command) {
@@ -74,38 +76,61 @@ export function registerCronEditCommand(cron: Command) {
           }
 
           const patch: Record<string, unknown> = {};
-          if (typeof opts.name === "string") patch.name = opts.name;
-          if (typeof opts.description === "string") patch.description = opts.description;
-          if (opts.enable && opts.disable)
+          if (typeof opts.name === "string") {
+            patch.name = opts.name;
+          }
+          if (typeof opts.description === "string") {
+            patch.description = opts.description;
+          }
+          if (opts.enable && opts.disable) {
             throw new Error("Choose --enable or --disable, not both");
-          if (opts.enable) patch.enabled = true;
-          if (opts.disable) patch.enabled = false;
+          }
+          if (opts.enable) {
+            patch.enabled = true;
+          }
+          if (opts.disable) {
+            patch.enabled = false;
+          }
           if (opts.deleteAfterRun && opts.keepAfterRun) {
             throw new Error("Choose --delete-after-run or --keep-after-run, not both");
           }
-          if (opts.deleteAfterRun) patch.deleteAfterRun = true;
-          if (opts.keepAfterRun) patch.deleteAfterRun = false;
-          if (typeof opts.session === "string") patch.sessionTarget = opts.session;
-          if (typeof opts.wake === "string") patch.wakeMode = opts.wake;
+          if (opts.deleteAfterRun) {
+            patch.deleteAfterRun = true;
+          }
+          if (opts.keepAfterRun) {
+            patch.deleteAfterRun = false;
+          }
+          if (typeof opts.session === "string") {
+            patch.sessionTarget = opts.session;
+          }
+          if (typeof opts.wake === "string") {
+            patch.wakeMode = opts.wake;
+          }
           if (opts.agent && opts.clearAgent) {
             throw new Error("Use --agent or --clear-agent, not both");
           }
           if (typeof opts.agent === "string" && opts.agent.trim()) {
-            patch.agentId = normalizeAgentId(opts.agent);
+            patch.agentId = sanitizeAgentId(opts.agent.trim());
           }
           if (opts.clearAgent) {
             patch.agentId = null;
           }
 
           const scheduleChosen = [opts.at, opts.every, opts.cron].filter(Boolean).length;
-          if (scheduleChosen > 1) throw new Error("Choose at most one schedule change");
+          if (scheduleChosen > 1) {
+            throw new Error("Choose at most one schedule change");
+          }
           if (opts.at) {
             const atMs = parseAtMs(String(opts.at));
-            if (!atMs) throw new Error("Invalid --at");
+            if (!atMs) {
+              throw new Error("Invalid --at");
+            }
             patch.schedule = { kind: "at", atMs };
           } else if (opts.every) {
             const everyMs = parseDurationMs(String(opts.every));
-            if (!everyMs) throw new Error("Invalid --every");
+            if (!everyMs) {
+              throw new Error("Invalid --every");
+            }
             patch.schedule = { kind: "every", everyMs };
           } else if (opts.cron) {
             patch.schedule = {

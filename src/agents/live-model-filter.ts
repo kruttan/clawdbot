@@ -32,7 +32,9 @@ function matchesAny(id: string, values: string[]): boolean {
 export function isModernModelRef(ref: ModelRef): boolean {
   const provider = ref.provider?.trim().toLowerCase() ?? "";
   const id = ref.id?.trim().toLowerCase() ?? "";
-  if (!provider || !id) return false;
+  if (!provider || !id) {
+    return false;
+  }
 
   if (provider === "anthropic") {
     return matchesPrefix(id, ANTHROPIC_PREFIXES);
@@ -67,6 +69,9 @@ export function isModernModelRef(ref: ModelRef): boolean {
   }
 
   if (provider === "opencode" && id.endsWith("-free")) {
+    return false;
+  }
+  if (provider === "opencode" && id === "alpha-glm-4.7") {
     return false;
   }
 

@@ -3,6 +3,7 @@ import type {
   ChannelsStatusSnapshot,
   ConfigUiHints,
   DiscordStatus,
+  GoogleChatStatus,
   IMessageStatus,
   NostrProfile,
   NostrStatus,
@@ -25,7 +26,7 @@ export type ChannelsProps = {
   whatsappQrDataUrl: string | null;
   whatsappConnected: boolean | null;
   whatsappBusy: boolean;
-  configSchema: unknown | null;
+  configSchema: unknown;
   configSchemaLoading: boolean;
   configForm: Record<string, unknown> | null;
   configUiHints: ConfigUiHints;
@@ -52,6 +53,7 @@ export type ChannelsChannelData = {
   whatsapp?: WhatsAppStatus;
   telegram?: TelegramStatus;
   discord?: DiscordStatus | null;
+  googlechat?: GoogleChatStatus | null;
   slack?: SlackStatus | null;
   signal?: SignalStatus | null;
   imessage?: IMessageStatus | null;

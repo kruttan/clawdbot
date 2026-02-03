@@ -1,10 +1,10 @@
 {
-  "name": "clawdbot-control-ui",
+  "name": "openclaw-control-ui",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite",
     "build": "vite build",
+    "dev": "vite",
     "preview": "vite preview",
     "test": "vitest run --config vitest.config.ts"
   },
@@ -16,9 +16,8 @@
     "vite": "7.3.1"
   },
   "devDependencies": {
-    "@vitest/browser-playwright": "4.0.17",
-    "playwright": "^1.57.0",
-    "typescript": "^5.9.3",
-    "vitest": "4.0.17"
+    "@vitest/browser-playwright": "4.0.18",
+    "playwright": "^1.58.1",
+    "vitest": "4.0.18"
   }
 }

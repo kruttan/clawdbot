@@ -7,12 +7,22 @@ import type {
   OutboundRetryConfig,
   ReplyToMode,
 } from "./types.base.js";
+import type { ChannelHeartbeatVisibilityConfig } from "./types.channels.js";
 import type { DmConfig, ProviderCommandsConfig } from "./types.messages.js";
+import type { GroupToolPolicyBySenderConfig, GroupToolPolicyConfig } from "./types.tools.js";
 
 export type TelegramActionConfig = {
   reactions?: boolean;
   sendMessage?: boolean;
   deleteMessage?: boolean;
+  editMessage?: boolean;
+  /** Enable sticker actions (send and search). */
+  sticker?: boolean;
+};
+
+export type TelegramNetworkConfig = {
+  /** Override Node's autoSelectFamily behavior (true = enable, false = disable). */
+  autoSelectFamily?: boolean;
 };
 
 export type TelegramInlineButtonsScope = "off" | "dm" | "group" | "all" | "allowlist";
@@ -78,6 +88,8 @@ export type TelegramAccountConfig = {
   dms?: Record<string, DmConfig>;
   /** Outbound text chunk size (chars). Default: 4000. */
   textChunkLimit?: number;
+  /** Chunking mode: "length" (default) splits by size; "newline" splits on every newline. */
+  chunkMode?: "length" | "newline";
   /** Disable block streaming for this account. */
   blockStreaming?: boolean;
   /** Chunking config for draft streaming in `streamMode: "block"`. */
@@ -91,6 +103,8 @@ export type TelegramAccountConfig = {
   timeoutSeconds?: number;
   /** Retry policy for outbound Telegram API calls. */
   retry?: OutboundRetryConfig;
+  /** Network transport overrides for Telegram. */
+  network?: TelegramNetworkConfig;
   proxy?: string;
   webhookUrl?: string;
   webhookSecret?: string;
@@ -112,6 +126,10 @@ export type TelegramAccountConfig = {
    * - "extensive": agent can react liberally when appropriate
    */
   reactionLevel?: "off" | "ack" | "minimal" | "extensive";
+  /** Heartbeat visibility settings for this channel. */
+  heartbeat?: ChannelHeartbeatVisibilityConfig;
+  /** Controls whether link previews are shown in outbound messages. Default: true. */
+  linkPreview?: boolean;
 };
 
 export type TelegramTopicConfig = {
@@ -128,6 +146,9 @@ export type TelegramTopicConfig = {
 
 export type TelegramGroupConfig = {
   requireMention?: boolean;
+  /** Optional tool policy overrides for this group. */
+  tools?: GroupToolPolicyConfig;
+  toolsBySender?: GroupToolPolicyBySenderConfig;
   /** If specified, only load these skills for this group (when no topic). Omit = all skills; empty = no skills. */
   skills?: string[];
   /** Per-topic configuration (key is message_thread_id as string) */

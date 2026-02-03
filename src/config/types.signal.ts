@@ -4,9 +4,11 @@ import type {
   GroupPolicy,
   MarkdownConfig,
 } from "./types.base.js";
+import type { ChannelHeartbeatVisibilityConfig } from "./types.channels.js";
 import type { DmConfig } from "./types.messages.js";
 
 export type SignalReactionNotificationMode = "off" | "own" | "all" | "allowlist";
+export type SignalReactionLevel = "off" | "ack" | "minimal" | "extensive";
 
 export type SignalAccountConfig = {
   /** Optional display name for this account (used in CLI/UI lists). */
@@ -31,6 +33,8 @@ export type SignalAccountConfig = {
   cliPath?: string;
   /** Auto-start signal-cli daemon (default: true if httpUrl not set). */
   autoStart?: boolean;
+  /** Max time to wait for signal-cli daemon startup (ms, cap 120000). */
+  startupTimeoutMs?: number;
   receiveMode?: "on-start" | "manual";
   ignoreAttachments?: boolean;
   ignoreStories?: boolean;
@@ -55,6 +59,8 @@ export type SignalAccountConfig = {
   dms?: Record<string, DmConfig>;
   /** Outbound text chunk size (chars). Default: 4000. */
   textChunkLimit?: number;
+  /** Chunking mode: "length" (default) splits by size; "newline" splits on every newline. */
+  chunkMode?: "length" | "newline";
   blockStreaming?: boolean;
   /** Merge streamed block replies before sending. */
   blockStreamingCoalesce?: BlockStreamingCoalesceConfig;
@@ -63,6 +69,21 @@ export type SignalAccountConfig = {
   reactionNotifications?: SignalReactionNotificationMode;
   /** Allowlist for reaction notifications when mode is allowlist. */
   reactionAllowlist?: Array<string | number>;
+  /** Action toggles for message tool capabilities. */
+  actions?: {
+    /** Enable/disable sending reactions via message tool (default: true). */
+    reactions?: boolean;
+  };
+  /**
+   * Controls agent reaction behavior:
+   * - "off": No reactions
+   * - "ack": Only automatic ack reactions (👀 when processing)
+   * - "minimal": Agent can react sparingly (default)
+   * - "extensive": Agent can react liberally
+   */
+  reactionLevel?: SignalReactionLevel;
+  /** Heartbeat visibility settings for this channel. */
+  heartbeat?: ChannelHeartbeatVisibilityConfig;
 };
 
 export type SignalConfig = {

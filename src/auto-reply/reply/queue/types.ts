@@ -1,9 +1,9 @@
+import type { ExecToolDefaults } from "../../../agents/bash-tools.js";
 import type { SkillSnapshot } from "../../../agents/skills.js";
-import type { ClawdbotConfig } from "../../../config/config.js";
+import type { OpenClawConfig } from "../../../config/config.js";
 import type { SessionEntry } from "../../../config/sessions.js";
 import type { OriginatingChannelType } from "../../templating.js";
 import type { ElevatedLevel, ReasoningLevel, ThinkLevel, VerboseLevel } from "../directives.js";
-import type { ExecToolDefaults } from "../../../agents/bash-tools.js";
 
 export type QueueMode = "steer" | "followup" | "collect" | "steer-backlog" | "interrupt" | "queue";
 
@@ -48,9 +48,16 @@ export type FollowupRun = {
     sessionKey?: string;
     messageProvider?: string;
     agentAccountId?: string;
+    groupId?: string;
+    groupChannel?: string;
+    groupSpace?: string;
+    senderId?: string;
+    senderName?: string;
+    senderUsername?: string;
+    senderE164?: string;
     sessionFile: string;
     workspaceDir: string;
-    config: ClawdbotConfig;
+    config: OpenClawConfig;
     skillsSnapshot?: SkillSnapshot;
     provider: string;
     model: string;
@@ -75,7 +82,7 @@ export type FollowupRun = {
 };
 
 export type ResolveQueueSettingsParams = {
-  cfg: ClawdbotConfig;
+  cfg: OpenClawConfig;
   channel?: string;
   sessionEntry?: SessionEntry;
   inlineMode?: QueueMode;
