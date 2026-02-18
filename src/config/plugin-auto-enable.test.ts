@@ -16,6 +16,18 @@ describe("applyPluginAutoEnable", () => {
     expect(result.changes.join("\n")).toContain("Slack configured, enabled automatically.");
   });
 
+  it("auto-enables agentmail when channel webhook config is present", () => {
+    const result = applyPluginAutoEnable({
+      config: {
+        channels: { agentmail: { webhookUrl: "https://example.com/agentmail-webhook" } },
+      },
+      env: {},
+    });
+
+    expect(result.config.plugins?.entries?.agentmail?.enabled).toBe(true);
+    expect(result.changes.join("\n")).toContain("agentmail configured, not enabled yet.");
+  });
+
   it("respects explicit disable", () => {
     const result = applyPluginAutoEnable({
       config: {
