@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { RuntimeEnv } from "../runtime.js";
+import { agentmailPlugin } from "../../extensions/agentmail/src/channel.js";
 import { discordPlugin } from "../../extensions/discord/src/channel.js";
 import { imessagePlugin } from "../../extensions/imessage/src/channel.js";
 import { signalPlugin } from "../../extensions/signal/src/channel.js";
@@ -74,6 +75,7 @@ describe("channels command", () => {
     setActivePluginRegistry(
       createTestRegistry([
         { pluginId: "discord", plugin: discordPlugin, source: "test" },
+        { pluginId: "agentmail", plugin: agentmailPlugin, source: "test" },
         { pluginId: "slack", plugin: slackPlugin, source: "test" },
         { pluginId: "telegram", plugin: telegramPlugin, source: "test" },
         { pluginId: "whatsapp", plugin: whatsappPlugin, source: "test" },
@@ -126,6 +128,51 @@ describe("channels command", () => {
     expect(next.channels?.slack?.enabled).toBe(true);
     expect(next.channels?.slack?.botToken).toBe("xoxb-1");
     expect(next.channels?.slack?.appToken).toBe("xapp-1");
+  });
+
+  it("adds agentmail webhook channel config", async () => {
+    configMocks.readConfigFileSnapshot.mockResolvedValue({ ...baseSnapshot });
+    await channelsAddCommand(
+      {
+        channel: "agentmail",
+        token: "am_test_token",
+        webhookPath: "/agentmail-webhook",
+        webhookUrl: "https://example.com/agentmail-webhook",
+      },
+      runtime,
+      { hasFlags: true },
+    );
+
+    expect(configMocks.writeConfigFile).toHaveBeenCalledTimes(1);
+    const next = configMocks.writeConfigFile.mock.calls[0]?.[0] as {
+      channels?: {
+        agentmail?: {
+          enabled?: boolean;
+          apiKey?: string;
+          webhookPath?: string;
+          webhookUrl?: string;
+        };
+      };
+    };
+    expect(next.channels?.agentmail?.enabled).toBe(true);
+    expect(next.channels?.agentmail?.apiKey).toBe("am_test_token");
+    expect(next.channels?.agentmail?.webhookPath).toBe("/agentmail-webhook");
+    expect(next.channels?.agentmail?.webhookUrl).toBe("https://example.com/agentmail-webhook");
+  });
+
+  it("rejects non-default agentmail account ids", async () => {
+    configMocks.readConfigFileSnapshot.mockResolvedValue({ ...baseSnapshot });
+    await channelsAddCommand(
+      { channel: "agentmail", account: "work", token: "am_test_token" },
+      runtime,
+      { hasFlags: true },
+    );
+
+    expect(configMocks.writeConfigFile).not.toHaveBeenCalled();
+    expect(runtime.error).toHaveBeenCalledWith(
+      expect.stringContaining("supports only the default account"),
+    );
+    expect(runtime.exit).toHaveBeenCalledWith(1);
   });
 
   it("deletes a non-default discord account", async () => {

@@ -12,6 +12,7 @@ export interface AgentMailAccountConfig {
   webhookPort?: number;
   webhookUrl?: string;
   webhookSecret?: string;
+  webhookSecretHeader?: string;
   timeoutSeconds?: number;
   thinkingDefault?: "off" | "minimal" | "low" | "medium" | "high";
   dmPolicy?: "pairing" | "allowlist" | "open" | "disabled";
@@ -88,6 +89,7 @@ export function resolveAgentMailAccount(opts: {
       webhookPort: agentmailCfg?.webhookPort,
       webhookUrl: agentmailCfg?.webhookUrl,
       webhookSecret: agentmailCfg?.webhookSecret,
+      webhookSecretHeader: agentmailCfg?.webhookSecretHeader,
       timeoutSeconds: agentmailCfg?.timeoutSeconds,
       thinkingDefault: agentmailCfg?.thinkingDefault,
       dmPolicy: agentmailCfg?.dmPolicy,
